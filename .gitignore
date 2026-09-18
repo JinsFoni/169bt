@@ -12,3 +12,6 @@ data/
 *.db-shm
 .DS_Store
 .env
+
+# 测试用 OCR 模型缓存
+.ddddocr/

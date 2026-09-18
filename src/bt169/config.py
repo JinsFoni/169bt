@@ -9,6 +9,8 @@ __all__ = [
     "ConfigError", "PROJECT_ROOT", "DATA_DIR", "DB_PATH", "IMAGE_DIR", "UI_DIR",
     "SECRET_FIELDS", "SETTINGS_SECTIONS", "PLACEHOLDER", "parse_rss_url",
     "section_key", "is_secret",
+    "FORUM_BASE", "DEFAULT_FID", "THREADS_PER_PAGE", "FETCH_DELAY_RANGE",
+    "USER_AGENT", "MAX_BACKFILL_PAGES", "MAX_BACKFILL_DAYS",
 ]
 
 # 项目根：src/bt169/config.py → src/bt169 → src → 项目根
@@ -83,3 +85,30 @@ def parse_rss_url(raw: str) -> tuple[str, str]:
 
     clean = urlunparse(parsed._replace(query=f"fid={fid}", fragment=""))
     return fid, clean
+
+
+# ---------------------------------------------------------------- 论坛抓取参数
+
+#: 论坛根地址。实测可匿名访问（REQUIREMENTS.md 事实 #20）。
+FORUM_BASE = "https://169bt.com"
+
+#: 默认版块 fid（实测：目标版块为 192）。
+DEFAULT_FID = "192"
+
+#: 列表页每页帖子数（实测 28）。
+THREADS_PER_PAGE = 28
+
+#: 每页请求之间的最小/最大随机间隔（秒）。C-7 硬要求。
+FETCH_DELAY_RANGE = (2.0, 5.0)
+
+#: 浏览器 UA。论坛对默认 python-urllib UA 会拒绝。
+USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+)
+
+#: 回填时最多翻多少页，防止一次请求把论坛翻穿（28 × 200 ≈ 5600 帖）。
+MAX_BACKFILL_PAGES = 200
+
+#: 回填允许的最大天数跨度。
+MAX_BACKFILL_DAYS = 366
