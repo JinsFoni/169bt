@@ -89,6 +89,8 @@ def make_detail(tid: int, *, ed2k: bool = True, locked: bool = False) -> ThreadD
         cover_img=f"https://img.example/{tid}.jpg", detail_img=None,
         ed2k=f"ed2k://|file|{tid}.mkv|1|AB|/" if ed2k else None,
         locked=locked,
+        # 真实的 parse_thread_detail 一定会带上来源 HTML（感谢流程要复用）
+        html=f"<html>thread {tid}</html>",
     )
 
 
@@ -455,3 +457,108 @@ def test_runner_creates_exactly_one_job(env):
     runner.start(from_date="2026-09-14", to_date="2026-09-14")
     runner.join(timeout=5)
     assert len(jobs.recent()) == 1
+
+
+# ------------------------------------------------------------ 感谢解锁（C-4）
+
+
+class FakeThanks:
+    """假感谢客户端，记录调用。"""
+
+    def __init__(self, *, unlocked: dict[int, ThreadDetail] | None = None,
+                 fail: set[int] | None = None) -> None:
+        self.unlocked = unlocked or {}
+        self.fail = fail or set()
+        self.calls: list[tuple[int, bool]] = []   # (tid, 是否复用了 html)
+
+    def thank(self, tid: int, *, html: str | None = None):
+        from bt169.source.thanks import ThanksError, ThanksResult
+
+        self.calls.append((tid, html is not None))
+        if tid in self.fail:
+            raise ThanksError(f"tid {tid} 感谢失败")
+        if tid in self.unlocked:
+            d = self.unlocked[tid]
+            return ThanksResult(tid, ok=True, ed2k=d.ed2k, html="<html>unlocked</html>")
+        return ThanksResult(tid, ok=False, message="未解锁")
+
+
+def test_thanks_unlocks_pending_into_done(env, monkeypatch):
+    """★ 核心：需要感谢的帖子应直接变成 done，而不是留下 pending。"""
+    db, posts, jobs = env
+    fc = FakeForum(pages={1: rows((101, "2026-09-14"))},
+                   details={101: make_detail(101, ed2k=False, locked=True)})
+    thanks = FakeThanks(unlocked={101: make_detail(101, ed2k=True)})
+
+    # 感谢后重新解析得到的 detail 由 parse_thread_detail 决定，这里打桩它
+    import bt169.collector as col
+    monkeypatch.setattr(
+        col, "parse_thread_detail",
+        lambda html, tid: make_detail(tid, ed2k=True),
+    )
+
+    c = Collector(client=fc, posts=posts, jobs=jobs, thanks=thanks)  # type: ignore[arg-type]
+    result = c.run(from_date="2026-09-14", to_date="2026-09-14")
+
+    assert result.collected == 1
+    assert posts.get(101).status == "done"
+    assert posts.get(101).ed2k is not None
+    assert thanks.calls == [(101, True)], "应复用已抓到的 HTML，省一次限速请求"
+
+
+def test_thanks_not_called_when_ed2k_already_visible(env):
+    """已有 ed2k 的帖子不该走感谢流程。"""
+    db, posts, jobs = env
+    fc = FakeForum(pages={1: rows((101, "2026-09-14"))},
+                   details={101: make_detail(101, ed2k=True)})
+    thanks = FakeThanks()
+    c = Collector(client=fc, posts=posts, jobs=jobs, thanks=thanks)  # type: ignore[arg-type]
+    c.run(from_date="2026-09-14", to_date="2026-09-14")
+    assert thanks.calls == []
+
+
+def test_thanks_absent_keeps_pending(env):
+    """未注入感谢客户端时，锁定帖仍以 pending 入库（不报错）。"""
+    db, posts, jobs = env
+    fc = FakeForum(pages={1: rows((101, "2026-09-14"))},
+                   details={101: make_detail(101, ed2k=False, locked=True)})
+    c = Collector(client=fc, posts=posts, jobs=jobs)  # type: ignore[arg-type]
+    result = c.run(from_date="2026-09-14", to_date="2026-09-14")
+
+    assert result.collected == 1
+    assert result.failed == 0
+    assert posts.get(101).status == "pending"
+
+
+def test_thanks_failure_does_not_fail_collection(env):
+    """★ 解锁失败 ≠ 采集失败：其余字段已拿到，先落 pending。"""
+    db, posts, jobs = env
+    fc = FakeForum(pages={1: rows((101, "2026-09-14"))},
+                   details={101: make_detail(101, ed2k=False, locked=True)})
+    thanks = FakeThanks(fail={101})
+    c = Collector(client=fc, posts=posts, jobs=jobs, thanks=thanks)  # type: ignore[arg-type]
+    result = c.run(from_date="2026-09-14", to_date="2026-09-14")
+
+    assert result.failed == 0
+    assert result.collected == 1
+    assert posts.get(101).status == "pending"
+    assert posts.get(101).code == "ABC-101", "其余字段应保留"
+
+
+def test_thanks_login_required_aborts_job(env):
+    """★ 感谢时发现会话失效 → 中止整个任务，而不是把剩余帖子全刷成失败。"""
+    db, posts, jobs = env
+    fc = FakeForum(pages={1: rows((101, "2026-09-14"), (102, "2026-09-14"))},
+                   details={101: make_detail(101, ed2k=False, locked=True),
+                            102: make_detail(102, ed2k=False, locked=True)})
+
+    class Exploding(FakeThanks):
+        def thank(self, tid, *, html=None):
+            raise LoginRequired("会话失效")
+
+    c = Collector(client=fc, posts=posts, jobs=jobs, thanks=Exploding())  # type: ignore[arg-type]
+    with pytest.raises(LoginRequired):
+        c.run(from_date="2026-09-14", to_date="2026-09-14")
+
+    assert jobs.recent()[0].status == JOB_FAILED
+    assert "会话失效" in jobs.recent()[0].message

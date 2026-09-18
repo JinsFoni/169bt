@@ -20,6 +20,7 @@ from bt169.repo.collect import CollectJob, CollectRepo
 from bt169.repo.posts import PostRepo
 from bt169.source.forum import ForumClient
 from bt169.source.session import SessionStore
+from bt169.source.thanks import ThanksClient
 
 router = APIRouter(prefix="/api/collect", tags=["collect"])
 
@@ -48,11 +49,22 @@ def get_runner(request: Request) -> CollectRunner:
 
 
 def _build_runner(request: Request) -> CollectRunner:
-    """按需装配 runner（惰性，避免 import 期副作用）。"""
+    """按需装配 runner（惰性，避免 import 期副作用）。
+
+    ★ **登录是稀缺资源**（5 次 / 900 秒，按 IP），因此这里**不做**
+    「启动时自动重登」。只做两件事：
+
+    1. 复用已保存且仍有效的 Cookie；
+    2. 若配置了站点账号密码，注入一个 :class:`ThanksClient`，
+       让需要感谢的帖子在采集时就地解锁（C-4）。
+
+    会话失效时的重登由 :class:`bt169.source.session` 的主动续期负责
+    （见 ARCHITECTURE.md §5.2），不在这里抢额度。
+    """
     db = request.app.state.db
+    settings = SettingsRepo(db, request.app.state.box)
     sessions = SessionStore(db)
 
-    # 复用已保存的会话 Cookie（匿名也能采集列表与大部分详情）
     session = sessions.load()
     cookies = session.cookies if session and session.valid else None
 
@@ -61,6 +73,9 @@ def _build_runner(request: Request) -> CollectRunner:
         client=client,
         posts=PostRepo(db),
         jobs=CollectRepo(db),
+        # ★ 只有拿着有效会话才注入感谢：匿名会话下感谢必然失败，
+        #   不注入就自然停在 pending，不会白跑一轮限速请求。
+        thanks=ThanksClient(client=client) if cookies else None,
     )
     runner = CollectRunner(collector, CollectRepo(db))
     request.app.state.collect_runner = runner

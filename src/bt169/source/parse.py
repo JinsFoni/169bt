@@ -23,6 +23,7 @@ __all__ = [
     "normalize_date",
     "extract_ed2k",
     "extract_codes",
+    "extract_formhash",
     "is_login_required",
     "is_thanks_required",
 ]
@@ -35,6 +36,12 @@ CODE_RE = re.compile(r"(?i)(?:^|[^A-Za-z0-9])([A-Z]{2,6}-\d{2,5})(?:[^0-9]|$)")
 
 #: ed2k 链接。
 ED2K_RE = re.compile(r"ed2k://\|file\|[^|\r\n]+\|\d+\|[0-9A-Fa-f]+\|/")
+
+#: 页面 formhash。Discuz 每个页面各不相同（登录页 / 详情页），必须逐页取。
+#: 用「先定位标签、再取属性」两步走，这样属性顺序无关——实测真实页面是
+#: ``name=`` 在前，但没有理由赌它永远如此。
+_FORMHASH_RE = re.compile(r'<input\b[^>]*\bname="formhash"[^>]*>', re.I)
+_VALUE_ATTR_RE = re.compile(r'\bvalue="([^"]*)"', re.I)
 
 #: 「作者」块中的绝对日期（Discuz 对老帖直接输出文本而非 title 属性）。
 _ABS_DATE_RE = re.compile(r"(\d{4})-(\d{1,2})-(\d{1,2})")
@@ -105,6 +112,9 @@ class ThreadDetail:
     detail_img: str | None
     ed2k: str | None
     locked: bool                # True = 有隐藏内容且当前未解锁
+    #: 解析来源的原始 HTML。带上它是为了「感谢解锁」流程能复用同一页，
+    #: 避免为了再解析一次而多发一次 2–5 秒的限速请求。
+    html: str | None = None
 
 
 # ------------------------------------------------------------------ 工具
@@ -138,6 +148,22 @@ def extract_codes(text: str) -> set[str]:
     用双向提取而非 ``in`` 判断，避免 ``START-62`` 命中 ``START-624``（E-5）。
     """
     return {m.group(1).upper() for m in CODE_RE.finditer(text)}
+
+
+def extract_formhash(html: str) -> str | None:
+    """提取页面里的 ``formhash``。
+
+    Discuz 每个页面都有自己的 formhash（登录页、详情页各不相同），
+    所以**必须从当前页取**，不能跨页复用。
+
+    属性顺序无关：先定位含 ``name="formhash"`` 的 ``<input>`` 标签，
+    再从该标签里取 ``value``。
+    """
+    tag = _FORMHASH_RE.search(html)
+    if not tag:
+        return None
+    m = _VALUE_ATTR_RE.search(tag.group(0))
+    return m.group(1) if m else None
 
 
 def is_login_required(html: str) -> bool:
@@ -300,6 +326,7 @@ def parse_thread_detail(html: str, tid: int) -> ThreadDetail:
         detail_img=imgs[1] if len(imgs) > 1 else None,
         ed2k=ed2k,
         locked=ed2k is None and is_thanks_required(html),
+        html=html,
     )
 
 

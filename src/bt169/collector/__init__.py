@@ -30,8 +30,16 @@ from bt169.repo.collect import (
 )
 from bt169.repo.posts import PostRepo, now_iso
 from bt169.source.forum import FetchError, ForumClient, LoginRequired
+from bt169.source.parse import parse_thread_detail
+from bt169.source.thanks import ThanksClient, ThanksError
 
-__all__ = ["Collector", "CollectResult", "CollectError", "date_range", "ValidateError"]
+__all__ = [
+    "Collector",
+    "CollectResult",
+    "CollectError",
+    "date_range",
+    "ValidateError",
+]
 
 log = logging.getLogger(__name__)
 
@@ -96,11 +104,15 @@ class Collector:
         client: ForumClient,
         posts: PostRepo,
         jobs: CollectRepo,
+        thanks: ThanksClient | None = None,
         on_login_required=None,
     ) -> None:
         self._c = client
         self._posts = posts
         self._jobs = jobs
+        # ★ 未注入时不自动建：匿名会话下感谢必然失败，不如显式报错。
+        #   测试与匿名采集传 None，需要解锁的场景由 API 层注入。
+        self._thanks = thanks
         self._on_login_required = on_login_required
 
     # ---------------------------------------------------------------- 主流程
@@ -237,9 +249,36 @@ class Collector:
     # ---------------------------------------------------------------- 单帖
 
     def _collect_one(self, tid: int, post_date: str) -> None:
-        """抓一个帖子并入库。"""
+        """抓一个帖子并入库。
+
+        若帖子需要「感谢」才能看到 ed2k（实测：匿名或未感谢时 ed2k 隐藏），
+        且有可用会话，则**就地解锁**并重新解析——这样一趟采集就能直接
+        得到 ``done`` 而不是留下一堆 ``pending``。
+
+        解锁失败**不算采集失败**：帖子其余字段（番号/演员/封面）已拿到，
+        先以 ``pending`` 入库，日后重跑可再试。
+        """
         detail = self._c.fetch_thread(tid)
         status = "done" if detail.ed2k else ("pending" if detail.locked else "nolink")
+
+        if status == "pending" and self._thanks is not None:
+            try:
+                # ★ 把刚抓到的 HTML 传进去，省一次 2–5 秒的限速请求
+                result = self._thanks.thank(tid, html=detail.html)
+            except LoginRequired:
+                raise
+            except ThanksError as exc:
+                log.warning("帖子 %s 感谢失败：%s", tid, exc)
+            else:
+                # ★ 直接解析感谢流程里已经拿到的页面，不再多发一次请求。
+                #   解锁后正文会变（出现 ed2k 与附件块），必须重新解析。
+                if result.html:
+                    detail = parse_thread_detail(result.html, tid)
+                    status = (
+                        "done" if detail.ed2k
+                        else ("pending" if detail.locked else "nolink")
+                    )
+
         self._posts.upsert_collected(
             tid=tid,
             title=detail.title,
