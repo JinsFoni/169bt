@@ -3301,7 +3301,7 @@ cd /Users/mario/Dev/Projects/169bt
 .venv/bin/pytest -v
 ```
 
-Expected: 全部通过（预计 80+ 项）
+Expected: 126 passed
 
 - [ ] **Step 2: 覆盖率自检（可选但推荐）**
 
