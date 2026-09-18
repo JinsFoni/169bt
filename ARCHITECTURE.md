@@ -1178,7 +1178,7 @@ log.error("emby.sync.failed", exc_info=True)     # 但不影响浏览
 | **P0** | `config` + `db` + 迁移 + `169bt migrate` | ✅ **已完成**（126 测试通过；见 `docs/superpowers/plans/2026-09-18-backend-foundation.md`） |
 | **P1** | `source` 只读部分：`discover` + `fetch`（复用已存 Cookie）+ `parse` | ✅ **已完成**（`source/parse.py` + `source/forum.py` + `source/session.py`） |
 | **P2** | `captcha` + `login` + 额度保护 | ✅ **代码完成**（`source/captcha.py` + `source/login.py`，63 测试）；⚠️ 真实凭据下的登录 POST **尚未实测** |
-| **P3** | `collector` + 状态机 + 限速退避 | 🔶 **部分完成**：按日期范围采集（C-10）已跑通（真实站 13 帖 / 59 s）；定时轮询（C-1）、感谢解锁（C-4）、`imagecache` 待做 |
+| **P3** | `collector` + 状态机 + 限速退避 | 🔶 **大部分完成**：按日期范围采集（C-10）真实站跑通（13 帖）；感谢解锁（C-4）与图片本地化（W-15）已实现；**定时轮询（C-1）待做** |
 | **P4** | `api` 只读接口 + 静态分发 | 前端从 API 取数渲染，Playwright 54 项回归绿 |
 | **P5** | 写接口：删除/撤销、`auth`、`settings` + 加密 | 设置真落盘、密钥加密、脱敏正确 |
 | **P6** | `telegram` + 转发接口 | 卡片「下载」真的发到 TG；`per_post` 批量可用 |

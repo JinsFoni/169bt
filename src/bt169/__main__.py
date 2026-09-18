@@ -38,6 +38,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("migrate", help="建库 / 升级 schema")
     sub.add_parser("doctor", help="环境自检")
 
+    c = sub.add_parser("collect", help="采集指定日期范围的帖子（前台运行）")
+    c.add_argument("--from", dest="from_date", required=True,
+                   metavar="YYYY-MM-DD", help="起始日期（含）")
+    c.add_argument("--to", dest="to_date", required=True,
+                   metavar="YYYY-MM-DD", help="结束日期（含）")
+    c.add_argument("--fid", default=config.DEFAULT_FID, help="版块 ID")
+
     return p
 
 
@@ -55,6 +62,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_migrate()
     if args.command == "doctor":
         return _cmd_doctor()
+    if args.command == "collect":
+        return _cmd_collect(args)
     parser.print_usage(sys.stderr)
     return 2
 
@@ -88,6 +97,77 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         )
     finally:
         db.close()
+    return 0
+
+
+def _cmd_collect(args: argparse.Namespace) -> int:
+    """命令行采集（**前台**跑，实时打印进度）。
+
+    与 ``POST /api/collect`` 的区别：这里同步阻塞，适合定时任务
+    （cron / launchd / 容器 CMD）和首次历史回填——那些场景不需要
+    进度轮询，只需要「跑完并告诉我结果」。
+
+    ★ 不经过 ``CollectRunner``：runner 的意义是「HTTP 立即返回 +
+    后台线程」，而 CLI 本来就该等。少一层线程也少一处竞态。
+    """
+    from bt169.collector import (
+        CollectError,
+        Collector,
+        ValidateError,
+        date_range,
+    )
+    from bt169.collector.imagecache import ImageCache
+    from bt169.repo.collect import CollectRepo
+    from bt169.repo.posts import PostRepo
+    from bt169.repo.settings import SettingsRepo
+    from bt169.source.forum import ForumClient
+    from bt169.source.session import SessionStore
+    from bt169.source.thanks import ThanksClient
+
+    try:
+        days = date_range(args.from_date, args.to_date)
+    except ValidateError as exc:
+        print(f"参数错误：{exc}", file=sys.stderr)
+        return 2
+
+    db = Database(config.DB_PATH)
+    try:
+        db.migrate()
+        box = _load_or_create_key()
+        settings = SettingsRepo(db, box)
+
+        # 复用已保存的会话（与 API 路径一致，见 api/routes/collect.py）
+        session = SessionStore(db).load()
+        cookies = session.cookies if session and session.valid else None
+        if not cookies:
+            print("提示：无有效登录会话 → 帖子会停在 pending（无法感谢解锁）",
+                  file=sys.stderr)
+
+        client = ForumClient(cookies=cookies)
+        collector = Collector(
+            client=client,
+            posts=PostRepo(db),
+            jobs=CollectRepo(db),
+            thanks=ThanksClient(client=client) if cookies else None,
+            images=ImageCache(config.IMAGE_DIR),
+        )
+        print(f"采集 {days[0]} ~ {days[-1]}（{len(days)} 天，fid={args.fid}）")
+        result = collector.run(
+            from_date=args.from_date, to_date=args.to_date, fid=args.fid,
+            on_progress=lambda j: print(
+                f"  [{j.processed}/{j.total}] 新增 {j.collected}"
+                f" 跳过 {j.skipped} 失败 {j.failed}",
+                flush=True,
+            ),
+        )
+    except CollectError as exc:
+        print(f"采集失败：{exc}", file=sys.stderr)
+        return 1
+    finally:
+        db.close()
+
+    print(f"完成：新增 {result.collected}，跳过 {result.skipped}，"
+          f"失败 {result.failed}，共 {result.total} 帖")
     return 0
 
 

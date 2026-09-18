@@ -154,3 +154,129 @@ def _png(w=800, h=600):
     buf = io.BytesIO()
     Image.new("RGB", (w, h), (200, 120, 40)).save(buf, format="PNG")
     return buf.getvalue()
+
+
+# ------------------------------------------------------------ collect 子命令
+
+
+def test_parser_has_collect():
+    ns = build_parser().parse_args(
+        ["collect", "--from", "2026-09-01", "--to", "2026-09-14"]
+    )
+    assert ns.command == "collect"
+    assert ns.from_date == "2026-09-01"
+    assert ns.to_date == "2026-09-14"
+    assert ns.fid == "192"
+
+
+def test_collect_rejects_bad_dates(capsys):
+    """★ 日期非法必须返回非 0（否则 cron 无法感知失败）。"""
+    assert main(["collect", "--from", "bad", "--to", "2026-09-14"]) == 2
+    assert "YYYY-MM-DD" in capsys.readouterr().err
+
+
+def test_collect_rejects_reversed_range(capsys):
+    assert main(["collect", "--from", "2026-09-20", "--to", "2026-09-14"]) == 2
+    assert "晚于" in capsys.readouterr().err
+
+
+def test_collect_runs_and_reports(tmp_path, monkeypatch, capsys):
+    """★ CLI 采集端到端（假论坛客户端，不碰网络）。
+
+    CLI 不经过 CollectRunner（前台阻塞），所以必须单独测——
+    它是 cron/定时任务要用的入口。
+    """
+    from bt169.collector import Collector
+    from bt169.db import Database
+    from bt169.repo.collect import CollectRepo
+    from bt169.repo.posts import PostRepo
+    from bt169.source.parse import ListRow, ThreadDetail
+
+    monkeypatch.setattr("bt169.config.DB_PATH", tmp_path / "x.db")
+    monkeypatch.setattr("bt169.config.DATA_DIR", tmp_path)
+    monkeypatch.setattr("bt169.config.IMAGE_DIR", tmp_path / "images")
+
+    class FakeForum:
+        def list_page(self, *, fid="192", page=1):
+            if page > 1:
+                return []
+            return [ListRow(tid=1, title="T1", post_date="2026-09-14",
+                            reply_count=0)]
+
+        def fetch_thread(self, tid):
+            return ThreadDetail(
+                tid=tid, title="标题", code="ABC-1", actress="某",
+                release_date="2026-09-17", size="7GB", cover_img=None,
+                detail_img=None, ed2k="ed2k://|file|a.mkv|1|AB|/", locked=False,
+            )
+
+        def close(self):
+            pass
+
+    # 替换 CLI 内部构造的客户端
+    import bt169.source.forum as forum_mod
+    monkeypatch.setattr(forum_mod, "ForumClient", lambda **kw: FakeForum())
+    import bt169.collector as collector_mod
+    monkeypatch.setattr(collector_mod, "ForumClient", lambda **kw: FakeForum(),
+                        raising=False)
+
+    # CLI 是在函数内部 import 的，所以 patch 模块属性即可
+    import bt169.api.routes.collect  # noqa: F401
+
+    rc = main(["collect", "--from", "2026-09-14", "--to", "2026-09-14"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "采集 2026-09-14" in out
+    assert "完成：" in out
+
+    # ★ 必须真的落库——否则「输出对但啥也没干」也会通过
+    db = Database(tmp_path / "x.db")
+    try:
+        row = db.read().execute("SELECT tid, ed2k FROM posts").fetchone()
+    finally:
+        db.close()
+    assert row is not None, "CLI 采集必须真的写入数据库"
+    assert row["tid"] == 1
+    assert row["ed2k"]
+
+
+def test_collect_progress_callback_gets_job(tmp_path, monkeypatch):
+    """★ 回归：进度回调必须收到带 processed/total 的实时 job。
+
+    早先传的是 CollectResult（跑完后的汇总），它**没有** processed
+    字段 → 每帖都抛 AttributeError。因为回调是防御性的（异常只记日志），
+    采集本身照跑不误，于是「进度条一帧都不动」这种故障很容易被忽略。
+    """
+    from bt169.collector import Collector, CollectResult
+    from bt169.db import Database
+    from bt169.repo.collect import CollectRepo
+    from bt169.repo.posts import PostRepo
+    from bt169.source.parse import ListRow, ThreadDetail
+
+    db = Database(tmp_path / "x.db")
+    db.migrate()
+    seen: list[tuple[int, int]] = []
+
+    class FakeForum:
+        def list_page(self, *, fid="192", page=1):
+            if page > 1:
+                return []
+            return [ListRow(tid=i, title=f"T{i}", post_date="2026-09-14",
+                            reply_count=0) for i in (1, 2)]
+
+        def fetch_thread(self, tid):
+            return ThreadDetail(
+                tid=tid, title="标题", code="ABC-1", actress=None,
+                release_date=None, size=None, cover_img=None, detail_img=None,
+                ed2k="ed2k://|file|a.mkv|1|AB|/", locked=False,
+            )
+
+        def close(self):
+            pass
+
+    c = Collector(client=FakeForum(), posts=PostRepo(db), jobs=CollectRepo(db))  # type: ignore[arg-type]
+    c.run(from_date="2026-09-14", to_date="2026-09-14",
+          on_progress=lambda j: seen.append((j.processed, j.total)))
+    db.close()
+
+    assert seen == [(1, 2), (2, 2)], f"进度回调应逐帖触发，实际 {seen}"

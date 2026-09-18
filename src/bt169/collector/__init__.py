@@ -131,6 +131,8 @@ class Collector:
         # ★ 未注入则不做本地化（测试、离线环境）
         self._images = images
         self._on_login_required = on_login_required
+        # 进度回调（CLI 用）。默认无操作，避免每帖都判 None。
+        self._on_progress: Callable[[CollectJob], None] | None = None
 
     # ---------------------------------------------------------------- 主流程
 
@@ -141,12 +143,15 @@ class Collector:
         to_date: str,
         fid: str = config.DEFAULT_FID,
         job: CollectJob | None = None,
+        on_progress: Callable[[CollectJob], None] | None = None,
     ) -> CollectResult:
         """执行一次采集（**阻塞**，调用方负责放到后台线程）。
 
         Args:
             job: 已建好的任务（由 :class:`CollectRunner` 预建以避免重复）。
                 为 ``None`` 时自行创建。
+            on_progress: 每处理完一帖回调一次（CLI 打印进度用）。
+                回调抛异常**不会**中断采集——进度显示不该拖垮长任务。
 
         Raises:
             ValidateError: 日期非法。
@@ -157,6 +162,7 @@ class Collector:
             job = self._jobs.create(from_date=from_date, to_date=to_date, fid=fid)
         log.info("采集任务 %s 启动：%s → %s (fid=%s)",
                  job.id, from_date, to_date, fid)
+        self._on_progress = on_progress
         try:
             return self._run_job(job, days)
         except Exception as exc:  # noqa: BLE001 —— 必须落库后再抛
@@ -184,6 +190,25 @@ class Collector:
         )
 
         # ---------------- 阶段 2：抓取
+
+        def _tick() -> None:
+            """逐帖通知进度。
+
+            ★ 传的是**实时 ``CollectJob``**（有 ``processed``/``total``），
+            不是 ``CollectResult``——后者是跑完之后的汇总，没有「已处理
+            多少」这个中间量。
+
+            回调异常只记日志：进度显示坏了不该让长任务挂掉。
+            """
+            if self._on_progress is None:
+                return
+            try:
+                current = self._jobs.get(job.id)
+                if current is not None:
+                    self._on_progress(current)
+            except Exception:  # noqa: BLE001
+                log.warning("进度回调异常（已忽略）", exc_info=True)
+
         for tid in tids:
             if self._jobs.is_cancel_requested(job.id):
                 current = self._jobs.get(job.id)
@@ -200,12 +225,14 @@ class Collector:
                 #   也不算「重新采集」。
                 self._repair_images(tid)
                 self._jobs.bump(job.id, processed=1, skipped=1)
+                _tick()
                 continue
 
             self._jobs.update(job.id, current_tid=tid)
             try:
                 self._collect_one(tid, job.from_date)
                 self._jobs.bump(job.id, processed=1, collected=1)
+                _tick()
             except LoginRequired as exc:
                 # 会话失效：交给上层重登录后重试整个任务更安全，
                 # 这里先如实记录并中止，避免用坏会话把剩余帖子全刷成失败。
@@ -215,6 +242,7 @@ class Collector:
             except (FetchError, Exception) as exc:  # noqa: BLE001
                 log.warning("帖子 %s 采集失败：%s", tid, exc)
                 self._jobs.bump(job.id, processed=1, failed=1)
+                _tick()
 
         final = self._jobs.get(job.id)
         self._jobs.finish(
