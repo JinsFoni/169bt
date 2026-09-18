@@ -304,3 +304,100 @@ def test_status_reports_running_collect(fake_app):
         assert body["collect"]["job_id"] is not None
     finally:
         fake_app.runner.join(timeout=10)
+
+
+# ------------------------------------------------------------ 真实 runner 装配
+#
+# ★ 这一组是回归测试，针对一类很隐蔽的失败：
+#
+#   其余测试全都把 `app.state.collect_runner` 换成了假 runner，
+#   于是 `_build_runner()` 的**每一行都没被执行过**。
+#   结果 `SettingsRepo` 忘了 import，336 个测试全绿，
+#   而真实请求一进来就是 500 `name 'SettingsRepo' is not defined`。
+#
+#   教训：替身注入得越彻底，真实装配路径越容易裸奔。
+#   必须有一条测试真的去构造 runner。
+
+
+def _fake_request(db, box, image_dir=None):
+    """造一个够 `_build_runner` 用的最小 Request 替身。"""
+    from types import SimpleNamespace
+
+    state = SimpleNamespace(db=db, box=box, image_dir=image_dir)
+    return SimpleNamespace(app=SimpleNamespace(state=state))
+
+
+def test_build_runner_works_without_session(db, box, tmp_path, monkeypatch):
+    """★ 无会话时也要能装配出 runner（匿名采集路径）。"""
+    from bt169.api.routes import collect as collect_route
+
+    monkeypatch.setattr(collect_route, "ForumClient", lambda **kw: FakeForum())
+    req = _fake_request(db, box, tmp_path / "images")
+
+    runner = collect_route._build_runner(req)
+    assert isinstance(runner, CollectRunner)
+    # 挂在 app.state 上，供后续请求复用
+    assert req.app.state.collect_runner is runner
+
+
+def test_build_runner_injects_images(db, box, tmp_path, monkeypatch):
+    """★ 有 image_dir 时必须注入 ImageCache（否则图片永远不本地化）。"""
+    from bt169.api.routes import collect as collect_route
+    from bt169.collector.imagecache import ImageCache
+
+    monkeypatch.setattr(collect_route, "ForumClient", lambda **kw: FakeForum())
+    req = _fake_request(db, box, tmp_path / "images")
+
+    runner = collect_route._build_runner(req)
+    assert isinstance(runner._collector._images, ImageCache)  # type: ignore[attr-defined]
+
+
+def test_build_runner_skips_images_without_dir(db, box, monkeypatch):
+    """image_dir 为 None（API 单测）时不注入，图片失败不该拖垮采集。"""
+    from bt169.api.routes import collect as collect_route
+
+    monkeypatch.setattr(collect_route, "ForumClient", lambda **kw: FakeForum())
+    runner = collect_route._build_runner(_fake_request(db, box, image_dir=None))
+    assert runner._collector._images is None  # type: ignore[attr-defined]
+
+
+def test_build_runner_no_thanks_without_session(db, box, tmp_path, monkeypatch):
+    """★ 匿名会话下不注入 ThanksClient：感谢必然失败，白跑一轮限速请求。"""
+    from bt169.api.routes import collect as collect_route
+
+    monkeypatch.setattr(collect_route, "ForumClient", lambda **kw: FakeForum())
+    runner = collect_route._build_runner(_fake_request(db, box, tmp_path / "i"))
+    assert runner._collector._thanks is None  # type: ignore[attr-defined]
+
+
+def test_build_runner_injects_thanks_with_valid_session(db, box, tmp_path, monkeypatch):
+    """★ 有有效会话时注入 ThanksClient —— 这才是 C-4 生效的路径。"""
+    from bt169.api.routes import collect as collect_route
+    from bt169.source.session import SessionStore
+    from bt169.source.thanks import ThanksClient
+
+    monkeypatch.setattr(collect_route, "ForumClient", lambda **kw: FakeForum())
+    store = SessionStore(db)
+    store.save_cookies({"cdb_sid": "abc"}, username="tester")
+
+    runner = collect_route._build_runner(_fake_request(db, box, tmp_path / "i"))
+    assert isinstance(runner._collector._thanks, ThanksClient)  # type: ignore[attr-defined]
+
+
+def test_real_collect_endpoint_does_not_500(db, box, tmp_path, monkeypatch):
+    """★ 端到端：**不注入**假 runner，走真实 ``_build_runner``。
+
+    这条测试的价值就在于「什么都不替换」——只有真实装配路径被跑到，
+    才能发现 import 缺失这类错误。
+    """
+    from fastapi.testclient import TestClient
+
+    from bt169.api.app import create_app
+    from bt169.api.routes import collect as collect_route
+
+    monkeypatch.setattr(collect_route, "ForumClient", lambda **kw: FakeForum())
+    app = create_app(db, box=box, ui_dir=None, image_dir=tmp_path / "images")
+    with TestClient(app) as c:
+        r = c.post("/api/collect",
+                   json={"from_date": "2026-09-14", "to_date": "2026-09-14"})
+    assert r.status_code == 202, r.text

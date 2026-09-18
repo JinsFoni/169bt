@@ -33,7 +33,12 @@ from bt169.source.forum import FetchError, ForumClient, LoginRequired
 from bt169.source.parse import parse_thread_detail
 from bt169.source.thanks import ThanksClient, ThanksError
 
-from bt169.collector.imagecache import CARD_WIDTH, ImageCache
+from bt169.collector.imagecache import (
+    CARD_WIDTH,
+    LIGHTBOX_WIDTH,
+    ImageCache,
+    ImageError,
+)
 
 __all__ = [
     "Collector",
@@ -66,6 +71,13 @@ class CollectResult:
     failed: int
     pages: int
     message: str | None
+
+
+#: 每个字段该用哪一档宽度。两处写入（新采 + 补图）共用，避免漂移。
+WIDTH_FOR_FIELD: dict[str, int] = {
+    "cover": CARD_WIDTH,        # 卡片缩略图
+    "detail": LIGHTBOX_WIDTH,   # 灯箱大图
+}
 
 
 def date_range(from_date: str, to_date: str) -> list[str]:
@@ -181,6 +193,12 @@ class Collector:
                 return self._summarize(job.id)
 
             if self._posts.exists(tid):
+                # ★ 已入库的帖子也要顺带修图：用户可能删过 data/images/，
+                #   而帖子本身在库里 → 单看「tid 已存在」会永远跳过它，
+                #   本地图路径就永久指向不存在的文件（前端裂图）。
+                #   修图只用库里的源 URL，**不碰论坛**，所以不受限速影响，
+                #   也不算「重新采集」。
+                self._repair_images(tid)
                 self._jobs.bump(job.id, processed=1, skipped=1)
                 continue
 
@@ -302,6 +320,14 @@ class Collector:
     def _localize(self, detail) -> dict[str, str | None]:  # type: ignore[no-untyped-def]
         """把封面图/详情图本地化，返回要写入的本地路径。
 
+        ★ 两档宽度各有用途（`FRONTEND.md` §8.3 / §531）：
+
+        - ``cover_local`` → **600px**：卡片缩略图
+        - ``detail_local`` → **1200px**：灯箱大图
+
+        早先两列都写 600px，结果 1200px 文件白生成（占了一半磁盘），
+        而灯箱只能显示 600px 的模糊图——**生成的东西必须有人用**。
+
         **不抛异常**：图片失败不该让整帖采集失败——番号、演员、ed2k
         比图重要得多。失败时返回空字典，那些列保持原值（见
         ``upsert_collected`` 的 COALESCE 语义）。
@@ -310,9 +336,54 @@ class Collector:
             return {}
         cached = self._images.ensure_post(detail)
         return {
-            f"{field}_local": img.variants.get(CARD_WIDTH)
+            f"{field}_local": img.variants.get(WIDTH_FOR_FIELD[field])
             for field, img in cached.items()
+            if field in WIDTH_FOR_FIELD
         }
+
+    def _repair_images(self, tid: int) -> None:
+        """补齐已入库帖子的缺失本地图（不访问论坛）。
+
+        与 ``_localize`` 的区别：这里的数据来自**数据库**（``cover_img``
+        源 URL 早就存下来了），所以纯本地操作，零网络请求、零限速开销。
+
+        ★ **本方法绝不抛异常**。它是对「已跳过」帖子的附带修补，而一个
+        采集任务可能跑几十分钟；因为某张图的问题让整个任务失败，
+        等于用芝麻换西瓜。任何异常都只记日志。
+        """
+        if self._images is None:
+            return
+        try:
+            post = self._posts.get(tid)
+            if post is None:
+                return
+            for field in ("cover", "detail"):
+                url = getattr(post, f"{field}_img", None)
+                local = getattr(post, f"{field}_local", None)
+                if not url:
+                    continue
+                want = WIDTH_FOR_FIELD[field]
+                # ★ 三个条件都要看：
+                #   - 文件在不在（磁盘）
+                #   - 路径记没记（数据库）
+                #   - 记的**宽度对不对**（见下）
+                #
+                # 只看 has() 会漏掉「文件在、但 cover_local 是 NULL」的情况
+                # （例如迁移/手改库），那时前端白白回退到外链。
+                #
+                # 只看「非空 + has()」会漏掉**宽度记错**的情况：早先版本
+                # 把 detail_local 也写成 600px，而 1200px 文件本来就在，
+                # has() 返回 True → 永远跳过 → 灯箱一直显示 600px 模糊图。
+                if local and self._images.has(url) and local.endswith(
+                    f"-{want}.webp"
+                ):
+                    continue
+                self._images.ensure(url)
+                self._posts.set_local_image(tid, field, self._images.url_for(
+                    self._images.key_for(url), want,
+                ))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("帖子 %s 补图失败（不影响采集）：%s", tid, exc)
 
     # ---------------------------------------------------------------- 汇总
 

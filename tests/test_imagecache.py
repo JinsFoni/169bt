@@ -350,3 +350,73 @@ def test_img_mount_serves_the_file(img_app):
     assert r.status_code == 200
     assert r.headers["content-type"] == "image/webp"
     assert len(r.content) > 0
+
+
+# ------------------------------------------------------------ /img 挂载（app 层）
+#
+# ★ 这一组是回归测试。两个真实 bug 都是「测试全绿但线上坏」：
+#   1. /img 只在目录已存在时才挂载 → 全新安装 404 到重启
+#   2. 注释声称 immutable 缓存，实际没有任何缓存头
+#   两者都不是单测能发现的——必须真的把 app 装起来发请求。
+
+
+def test_img_mounted_even_when_dir_missing(tmp_path, db, box):
+    """★ 回归：全新安装时图片目录尚不存在，/img 仍必须可用。
+
+    ImageCache 是首次下载才懒建目录的，所以启动时目录通常不存在。
+    """
+    from fastapi.testclient import TestClient
+
+    from bt169.api.app import create_app
+
+    missing = tmp_path / "not-yet" / "images"
+    assert not missing.exists()
+
+    app = create_app(db, box=box, ui_dir=None, image_dir=missing)
+    assert missing.is_dir(), "app 装配时必须把目录建出来"
+
+    # 真放一张图进去，确认能取到（而不是只挂了个空目录）
+    cache = ImageCache(missing, fetch=lambda u: png(800, 600))
+    local = cache.ensure("https://img.example/x.jpg").variants[600]
+    with TestClient(app) as c:
+        r = c.get(local)
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/webp"
+
+
+def test_img_sets_immutable_cache_header(tmp_path, db, box):
+    """★ 回归：本地化图片必须带长缓存头（文件名内容派生，可永久缓存）。"""
+    from fastapi.testclient import TestClient
+
+    from bt169.api.app import create_app
+
+    image_dir = tmp_path / "images"
+    app = create_app(db, box=box, ui_dir=None, image_dir=image_dir)
+    cache = ImageCache(image_dir, fetch=lambda u: png(800, 600))
+    local = cache.ensure("https://img.example/y.jpg").variants[600]
+
+    with TestClient(app) as c:
+        r = c.get(local)
+    cc = r.headers["cache-control"]
+    assert "immutable" in cc
+    assert "max-age=31536000" in cc
+
+
+def test_ui_static_does_not_get_immutable_header(tmp_path, db, box):
+    """★ 反向断言：前端文件**不能**带 immutable。
+
+    前端 HTML/JS/CSS 文件名不含哈希，用长缓存会导致改完代码刷新看不到。
+    """
+    from fastapi.testclient import TestClient
+
+    from bt169.api.app import create_app
+
+    ui_dir = tmp_path / "ui"
+    ui_dir.mkdir()
+    (ui_dir / "index.html").write_text("<html>hi</html>", encoding="utf-8")
+
+    app = create_app(db, box=box, ui_dir=ui_dir, image_dir=None)
+    with TestClient(app) as c:
+        r = c.get("/index.html")
+    assert r.status_code == 200
+    assert "immutable" not in r.headers.get("cache-control", "")

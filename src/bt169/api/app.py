@@ -56,18 +56,42 @@ def create_app(
     # 静态资源必须**最后**挂载：Starlette 按注册顺序匹配，
     # 挂在 "/" 的 StaticFiles 会吞掉之后注册的所有路由。
     #
-    # ``/img`` 是本地化图片（W-15）。文件名含内容哈希，所以可以
-    # 永久缓存（``immutable``）—— 换图必然换文件名。
-    if image_dir is not None and Path(image_dir).is_dir():
+    # ``/img`` 是本地化图片（W-15）。文件名含内容哈希（``sha1(源 URL)``
+    # + 宽度），换图必然换文件名 → 可以永久缓存。
+    #
+    # ★ 目录必须先建出来：``StaticFiles(check_dir=True)`` 在目录不存在时
+    #   直接抛错，而 ``ImageCache`` 是**首次下载时**才懒建子目录的。
+    #   若在这里因目录不存在而跳过挂载，全新安装的 ``/img`` 会 404 直到
+    #   重启——已入库的本地图全部显示不出来。
+    if image_dir is not None:
+        image_dir = Path(image_dir)
+        image_dir.mkdir(parents=True, exist_ok=True)
         app.mount(
             "/img",
-            StaticFiles(directory=str(image_dir)),
+            _ImmutableStaticFiles(directory=str(image_dir)),
             name="images",
         )
     if ui_dir is not None and Path(ui_dir).is_dir():
         app.mount("/", StaticFiles(directory=str(ui_dir), html=True), name="ui")
 
     return app
+
+
+class _ImmutableStaticFiles(StaticFiles):
+    """给本地化图片加长缓存头。
+
+    文件名是内容派生的（``{sha1(url)[:16]}-{width}.webp``），同一 URL
+    同一宽度的产物**永远不变**，所以可以放心让浏览器长期缓存：
+    省掉卡片滚动时的重复请求，也不怕内容过期。
+
+    ★ 只有这一条路径能这样干。前端 HTML/JS/CSS 的文件名不带哈希，
+    用同一策略会导致改完代码刷新看不到变化。
+    """
+
+    def file_response(self, full_path, stat_result, scope, status_code=200):  # type: ignore[no-untyped-def]
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        response.headers["cache-control"] = "public, max-age=31536000, immutable"
+        return response
 
 
 def _install_error_handler(app: FastAPI) -> None:

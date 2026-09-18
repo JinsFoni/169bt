@@ -91,6 +91,67 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _image_checks(db) -> list[tuple[str, bool, str, str]]:  # type: ignore[no-untyped-def]
+    """图片本地化自检（W-15）。
+
+    检查两类真实故障：
+
+    1. **数据库有本地路径，磁盘上却没有文件** → 前端裂图。
+       典型成因：手动删了 ``data/images/``、换机迁移只带走了 db、
+       或某次下载失败。采集时会对「已跳过」的帖子顺带补图
+       （见 ``Collector._repair_images``），所以重跑同区间即可自愈。
+    2. **孤儿文件**（没有任何帖子引用）→ 白占空间。
+       典型成因：删除帖子时进程被杀，只删了行没删文件。
+    """
+    from bt169.collector.imagecache import ImageCache
+    from bt169.repo.posts import PostRepo
+
+    out: list[tuple[str, bool, str, str]] = []
+    cache = ImageCache(config.IMAGE_DIR)
+    posts = PostRepo(db)
+
+    # ---- 1. 数据库引用的本地图是否真的存在 ----
+    missing: list[int] = []
+    for row in db.read().execute(
+        "SELECT tid, cover_local, detail_local FROM posts"
+    ):
+        for local in (row["cover_local"], row["detail_local"]):
+            if not local:
+                continue
+            rel = str(local).removeprefix("/img/")
+            if not (config.IMAGE_DIR / rel).is_file():
+                missing.append(row["tid"])
+                break
+
+    size_mb = cache.total_bytes() / 1024 / 1024
+    out.append((
+        f"本地图片 {size_mb:.1f} MB",
+        not missing,
+        f"{len(missing)} 个帖子的本地图丢失（如 {missing[:3]}）"
+        "—— 跑一次同区间的采集即可自动补回（无需清库）",
+        "",
+    ))
+
+    # ---- 2. 孤儿文件 ----
+    known = {
+        ImageCache.key_for(url)
+        for row in db.read().execute(
+            "SELECT cover_img, detail_img FROM posts"
+        )
+        for url in (row["cover_img"], row["detail_img"])
+        if url
+    }
+    orphans = cache.orphans(known)
+    orphan_mb = sum(p.stat().st_size for p in orphans) / 1024 / 1024
+    out.append((
+        f"孤儿图片 {len(orphans)} 个",
+        not orphans,
+        f"占用 {orphan_mb:.1f} MB，无帖子引用（删除中断遗留）",
+        "",
+    ))
+    return out
+
+
 def _cmd_doctor() -> int:
     """环境自检。所有检查项都实测，不做假设。"""
     import sqlite3
@@ -140,6 +201,7 @@ def _cmd_doctor() -> int:
         ))
         n = db.read().execute("SELECT COUNT(*) FROM posts").fetchone()[0]
         checks.append((f"帖子总数 {n}", True, "", ""))
+        checks.extend(_image_checks(db))
     except Exception as exc:
         checks.append(("数据库可用", False, str(exc), ""))
     finally:

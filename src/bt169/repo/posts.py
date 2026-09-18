@@ -124,6 +124,21 @@ class PostRepo:
                 ),
             )
 
+    def set_local_image(self, tid: int, field: str, local_url: str) -> None:
+        """只更新一个本地图路径（补图用，不动其余字段）。
+
+        ``field`` 只接受 ``"cover"`` / ``"detail"``——白名单而非字符串拼接，
+        避免把列名当 SQL 拼（虽然调用方是内部代码，但拼错会静默写错列）。
+        """
+        col = {"cover": "cover_local", "detail": "detail_local"}.get(field)
+        if col is None:
+            raise ValueError(f"未知图片字段：{field}")
+        with self._db.write() as conn:
+            conn.execute(
+                f"UPDATE posts SET {col}=?, updated_at=? WHERE tid=?",
+                (local_url, now_iso(), tid),
+            )
+
     def references_image(self, url: str) -> bool:
         """是否还有别的帖子引用这张图（删除联动做引用计数）。
 

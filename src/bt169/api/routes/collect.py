@@ -19,6 +19,7 @@ from bt169.collector import CollectError, Collector, CollectRunner, ValidateErro
 from bt169.collector.imagecache import ImageCache
 from bt169.repo.collect import CollectJob, CollectRepo
 from bt169.repo.posts import PostRepo
+from bt169.repo.settings import SettingsRepo
 from bt169.source.forum import ForumClient
 from bt169.source.session import SessionStore
 from bt169.source.thanks import ThanksClient

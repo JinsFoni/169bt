@@ -574,6 +574,29 @@ class FakeImages:
     def __init__(self, *, fail: set[str] | None = None) -> None:
         self.fail = fail or set()
         self.calls: list[int] = []
+        self.ensured: set[str] = set()      # 已「落盘」的源 URL
+
+    # ---- 供 _repair_images 使用（模拟真实的 has/ensure 语义）----
+
+    def has(self, url: str) -> bool:
+        return url in self.ensured
+
+    def key_for(self, url: str) -> str:
+        import hashlib
+        return hashlib.sha1(url.encode()).hexdigest()[:16]
+
+    def url_for(self, key: str, width: int) -> str:
+        return f"/img/{key[:2]}/{key}-{width}.webp"
+
+    def ensure(self, url: str):  # type: ignore[no-untyped-def]
+        from bt169.collector.imagecache import CachedImage
+
+        self.ensured.add(url)
+        key = self.key_for(url)
+        return CachedImage(url=url, key=key,
+                           variants={600: self.url_for(key, 600),
+                                     1200: self.url_for(key, 1200)},
+                           bytes_in=1, bytes_out=1)
 
     def ensure_post(self, detail):
         from bt169.collector.imagecache import CachedImage, ImageError
@@ -584,9 +607,12 @@ class FakeImages:
             url = getattr(detail, f"{field}_img", None)
             if not url or field in self.fail:
                 continue
+            self.ensured.add(url)
+            key = self.key_for(url)
             out[field] = CachedImage(
-                url=url, key="ab" * 8,
-                variants={600: f"/img/ab/{field}-600.webp"},
+                url=url, key=key,
+                variants={600: self.url_for(key, 600),
+                          1200: self.url_for(key, 1200)},
                 bytes_in=100, bytes_out=10,
             )
         return out
@@ -602,8 +628,9 @@ def test_images_localized_on_collect(env):
 
     p = posts.get(101)
     assert images.calls == [101]
-    assert p.cover_local == "/img/ab/cover-600.webp"
-    assert p.detail_local == "/img/ab/detail-600.webp"
+    # ★ 两档宽度各司其职：卡片 600、灯箱 1200
+    assert p.cover_local.endswith("-600.webp"), p.cover_local
+    assert p.detail_local.endswith("-1200.webp"), p.detail_local
 
 
 def test_image_failure_does_not_fail_collect(env):
@@ -666,3 +693,111 @@ def test_no_images_injected_is_fine(env):
     result = c.run(from_date="2026-09-14", to_date="2026-09-14")
     assert result.collected == 1
     assert posts.get(101).cover_local is None
+
+
+def test_skipped_post_gets_missing_images_repaired(env):
+    """★ 回归：已入库帖子若本地图丢失，重采时必须补回来。
+
+    真实场景：用户删了 data/images/（或换机迁移只带走了 db）。
+    采集按「tid 已存在」跳过该帖，于是那些本地图路径永远指向不存在的
+    文件——前端裂图，且**再也不会自愈**。
+
+    修复只依赖库里已有的源 URL，不访问论坛，所以不受限速影响。
+    """
+    db, posts, jobs = env
+    fc = FakeForum(pages={1: rows((101, "2026-09-14"))},
+                   details={101: make_detail(101)})
+    images = FakeImages()
+    Collector(client=fc, posts=posts, jobs=jobs, images=images).run(  # type: ignore[arg-type]
+        from_date="2026-09-14", to_date="2026-09-14")
+    assert posts.get(101).cover_local is not None
+
+    # 模拟「图文件被删掉」：清掉本地路径，保留源 URL
+    with db.write() as conn:
+        conn.execute("UPDATE posts SET cover_local=NULL WHERE tid=101")
+    assert posts.get(101).cover_local is None
+
+    images.calls.clear()
+    fc.fetch_calls.clear()
+    result = Collector(client=fc, posts=posts, jobs=jobs,  # type: ignore[arg-type]
+                       images=images).run(
+        from_date="2026-09-14", to_date="2026-09-14")
+
+    assert result.skipped == 1, "帖子本身仍应跳过（不重采）"
+    assert result.collected == 0
+    assert images.ensured, "但必须去补图"
+    assert fc.fetch_calls == [], "补图不该访问论坛（否则白耗限速额度）"
+    assert posts.get(101).cover_local is not None, "本地路径必须被修回来"
+
+
+def test_repair_failure_does_not_fail_job(env):
+    """补图失败（图床挂了）不该让任务失败——帖子数据本来就在库里。"""
+    db, posts, jobs = env
+    fc = FakeForum(pages={1: rows((101, "2026-09-14"))},
+                   details={101: make_detail(101)})
+    Collector(client=fc, posts=posts, jobs=jobs,  # type: ignore[arg-type]
+              images=FakeImages()).run(
+        from_date="2026-09-14", to_date="2026-09-14")
+    with db.write() as conn:
+        conn.execute("UPDATE posts SET cover_local=NULL WHERE tid=101")
+
+    class BoomImages:
+        def has(self, url):
+            return False
+
+        def ensure(self, url):
+            from bt169.collector.imagecache import ImageError
+            raise ImageError("图床 502")
+
+    result = Collector(client=fc, posts=posts, jobs=jobs,  # type: ignore[arg-type]
+                       images=BoomImages()).run(
+        from_date="2026-09-14", to_date="2026-09-14")
+    assert result.skipped == 1
+    assert result.failed == 0, "补图失败不算采集失败"
+
+
+def test_repair_noop_when_image_present(env):
+    """图还在就不该重复下载（避免每次采集都白跑一轮图床请求）。"""
+    db, posts, jobs = env
+    fc = FakeForum(pages={1: rows((101, "2026-09-14"))},
+                   details={101: make_detail(101)})
+
+    class TrackingImages(FakeImages):
+        pass
+
+    images = TrackingImages()
+    Collector(client=fc, posts=posts, jobs=jobs, images=images).run(  # type: ignore[arg-type]
+        from_date="2026-09-14", to_date="2026-09-14")
+    before = set(images.ensured)
+    Collector(client=fc, posts=posts, jobs=jobs, images=images).run(  # type: ignore[arg-type]
+        from_date="2026-09-14", to_date="2026-09-14")
+    assert images.ensured == before, "图还在就不该再下"
+
+
+def test_repair_fixes_wrong_width(env):
+    """★ 回归：detail_local 记成 600px 时必须被纠正为 1200px。
+
+    真实 bug：早先版本两列都写 600px。1200px 文件本来就存在，
+    所以「非空 + has() 为真」的检查会永远跳过它——灯箱一直显示
+    600px 模糊图，而磁盘上那份 1200px 从来没人用。
+    """
+    db, posts, jobs = env
+    fc = FakeForum(pages={1: rows((101, "2026-09-14"))},
+                   details={101: make_detail(101)})
+    images = FakeImages()
+    Collector(client=fc, posts=posts, jobs=jobs, images=images).run(  # type: ignore[arg-type]
+        from_date="2026-09-14", to_date="2026-09-14")
+    assert posts.get(101).detail_local.endswith("-1200.webp")
+
+    # 模拟旧数据：detail_local 被写成 600
+    with db.write() as conn:
+        conn.execute(
+            "UPDATE posts SET detail_local = replace(detail_local,'-1200.','-600.')"
+            " WHERE tid=101"
+        )
+    assert posts.get(101).detail_local.endswith("-600.webp")
+
+    Collector(client=fc, posts=posts, jobs=jobs, images=images).run(  # type: ignore[arg-type]
+        from_date="2026-09-14", to_date="2026-09-14")
+    assert posts.get(101).detail_local.endswith("-1200.webp"), "必须纠正宽度"
+    assert posts.get(101).cover_local.endswith("-600.webp"), "封面不该被改成 1200"
