@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse, urlunparse
 
@@ -15,7 +16,15 @@ __all__ = [
 
 # 项目根：src/bt169/config.py → src/bt169 → src → 项目根
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DATA_DIR = PROJECT_ROOT / "data"
+
+#: 数据目录。★ 可用 ``BT169_DATA_DIR`` 覆盖。
+#:
+#: 存在的理由：E2E 测试会通过真实 HTTP 写入**真实数据库**。没有这个开关时，
+#: 测试脚本只能跑在生产库上——曾因此把用户的真实论坛账号密码覆盖成
+#: ``e2e-user``（不可恢复）。有开关后测试跑在临时目录，怎么折腾都不伤真数据。
+DATA_DIR = Path(
+    os.environ.get("BT169_DATA_DIR") or (PROJECT_ROOT / "data")
+)
 DB_PATH = DATA_DIR / "169bt.db"
 IMAGE_DIR = DATA_DIR / "images"
 UI_DIR = PROJECT_ROOT / "ui"
