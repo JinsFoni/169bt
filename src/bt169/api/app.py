@@ -182,7 +182,7 @@ def _build_renew_loop(app: FastAPI, interval: float):
     # ★ delay_first=True：服务器重启是常见操作，启动即续期会在反复重启中
     #   把登录额度烧光（REQUIREMENTS.md §B.2.2）。首次检查推迟一个 interval。
     return EmbyScheduler(build_syncer=lambda: _Adapter(), interval=interval,
-                         delay_first=True)
+                         delay_first=True, name="session-renew")
 
 
 #: 会话续期的检查间隔（秒）。12 小时。

@@ -298,6 +298,7 @@ class EmbyScheduler:
     stop_event: Any = None       # threading.Event；None → 自己建
     clock: Any = None            # time.monotonic；注入用于测试
     delay_first: bool = False    # True → 首次 tick 推迟一个 interval
+    name: str = "emby-sync"      # 线程名（日志/调试用）
 
     def __post_init__(self) -> None:
         import threading
@@ -357,7 +358,7 @@ class EmbyScheduler:
         if self._thread is not None:
             return
         self._thread = threading.Thread(
-            target=self.run, name="emby-sync", daemon=True)
+            target=self.run, name=self.name, daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
