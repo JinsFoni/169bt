@@ -3120,43 +3120,52 @@ def _cmd_doctor() -> int:
     import sqlite3
     import sys as _sys
 
-    checks: list[tuple[str, bool, str]] = []
+    # (名称, 是否通过, 失败时的提示, 始终显示的备注)
+    checks: list[tuple[str, bool, str, str]] = []
 
     v = _sys.version_info
     checks.append((
         f"Python {v.major}.{v.minor}.{v.micro}",
         v >= (3, 10),
         "需要 ≥3.10（ddddocr 约束）",
+        "",
     ))
 
     checks.append((
         f"SQLite {sqlite3.sqlite_version}",
         sqlite3.sqlite_version_info >= (3, 35, 0),
         "需要 ≥3.35（部分索引 + UPSERT）",
+        "",
     ))
     checks.append((
         f"sqlite3 threadsafety={sqlite3.threadsafety}",
         sqlite3.threadsafety == 3,
         "需要 3（串行化）才能跨线程共享连接",
+        "",
     ))
 
-    checks.append((f"数据目录 {config.DATA_DIR.name}/", True, ""))
-    checks.append((f"前端目录 {config.UI_DIR.name}/", config.UI_DIR.is_dir(), "缺少 ui/ 目录"))
+    checks.append((f"数据目录 {config.DATA_DIR.name}/", True, "", str(config.DATA_DIR)))
+    checks.append((
+        f"前端目录 {config.UI_DIR.name}/", config.UI_DIR.is_dir(), "缺少 ui/ 目录", "",
+    ))
     checks.append((
         "前端入口 index.html",
         (config.UI_DIR / "index.html").is_file(),
         "缺少 ui/index.html",
+        "",
     ))
 
     db = Database(config.DB_PATH)
     try:
         db.migrate()
         mode = db.read().execute("PRAGMA journal_mode").fetchone()[0]
-        checks.append((f"journal_mode={mode}", mode.lower() == "wal", "需要 WAL"))
+        checks.append((
+            f"journal_mode={mode}", mode.lower() == "wal", "需要 WAL", "",
+        ))
         n = db.read().execute("SELECT COUNT(*) FROM posts").fetchone()[0]
-        checks.append((f"帖子总数 {n}", True, ""))
+        checks.append((f"帖子总数 {n}", True, "", ""))
     except Exception as exc:
-        checks.append(("数据库可用", False, str(exc)))
+        checks.append(("数据库可用", False, str(exc), ""))
     finally:
         db.close()
 
@@ -3164,16 +3173,20 @@ def _cmd_doctor() -> int:
     checks.append((
         f"主密钥 {key_path.name}",
         True,
-        "首次启动时自动生成" if not key_path.exists() else "",
+        "",
+        "尚未生成，首次 serve 时自动创建" if not key_path.exists() else "已存在",
     ))
 
-    width = max(len(name) for name, _, _ in checks)
+    width = max(len(name) for name, *_ in checks)
     ok_all = True
-    for name, ok, hint in checks:
+    for name, ok, hint, note in checks:
         mark = "✓" if ok else "✗"
         line = f"  {mark} {name.ljust(width)}"
-        if hint and not ok:
-            line += f"  ← {hint}"
+        # 失败提示只在失败时出现（「缺少 ui/ 目录」在通过时是噪音）；
+        # 备注则始终显示（「首次 serve 时自动创建」在通过时才有意义）。
+        detail = hint if not ok else note
+        if detail:
+            line += f"  ← {detail}"
         print(line)
         ok_all &= ok
 
