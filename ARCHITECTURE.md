@@ -200,10 +200,12 @@ Python 的 `ddddocr` 有 14.7k star、5 年历史，且**需求文档 §6 原本
 │   ├── telegram.py              # Bot API 客户端
 │   ├── api/
 │   │   ├── app.py               # FastAPI 应用装配
-│   │   ├── deps.py              # 依赖注入（db / settings / auth）
-│   │   ├── auth.py              # 访问密码 + 会话
+│   │   ├── deps.py              # 依赖注入（db / settings / images）
+│   │   ├── auth.py              # 访问密码哈希 + 面板会话（S-6）
+│   │   ├── gate.py              # ★ 门禁中间件（真正的安全边界）+ CSRF
 │   │   ├── static.py            # ui/ 静态分发
 │   │   └── routes/
+│   │       ├── auth.py          # /api/auth/{login,logout,me}（S-6）
 │   │       ├── posts.py         # 帖子 / 归档（含硬删除）
 │   │       ├── images.py        # /img/* 分发（immutable）
 │   │       ├── status.py        # /api/status（会话/采集器状态）
@@ -1177,10 +1179,10 @@ log.error("emby.sync.failed", exc_info=True)     # 但不影响浏览
 |---|---|---|
 | **P0** | `config` + `db` + 迁移 + `169bt migrate` | ✅ **已完成**（126 测试通过；见 `docs/superpowers/plans/2026-09-18-backend-foundation.md`） |
 | **P1** | `source` 只读部分：`discover` + `fetch`（复用已存 Cookie）+ `parse` | ✅ **已完成**（`source/parse.py` + `source/forum.py` + `source/session.py`） |
-| **P2** | `captcha` + `login` + 额度保护 | ✅ **代码完成**（`source/captcha.py` + `source/login.py`，63 测试）；⚠️ 真实凭据下的登录 POST **尚未实测** |
+| **P2** | `captcha` + `login` + 额度保护 | ✅ **已完成**（`source/captcha.py` + `source/login.py` + `bt169 login`）。★ **登录 POST 已实测**：对线上论坛提交过一次失败登录，服务端返回「您还可以尝试 4 次」——证明 formhash/loginhash/idhash 三件套、请求头、额度解析全部正确。该次事故同时暴露了「额度保护只写在文档里、代码从未实现」，已补上（规则 2/3）。⚠️ **成功**登录（拿到有效 Cookie）仍需真实凭据 |
 | **P3** | `collector` + 状态机 + 限速退避 | 🔶 **大部分完成**：按日期范围采集（C-10）真实站跑通（13 帖）；感谢解锁（C-4）与图片本地化（W-15）已实现；**定时轮询（C-1）待做** |
 | **P4** | `api` 只读接口 + 静态分发 | 前端从 API 取数渲染，Playwright 54 项回归绿 |
-| **P5** | 写接口：删除/撤销、`auth`、`settings` + 加密 | 设置真落盘、密钥加密、脱敏正确 |
+| **P5** | 写接口：删除/撤销、`auth`、`settings` + 加密 | ✅ **已完成**：设置真落盘、密钥 AES-GCM 加密、脱敏正确；**访问门禁已服务端校验**（`api/gate.py` + `api/auth.py`，PBKDF2-SHA256 哈希 + 会话 token 只存哈希 + CSRF Origin 校验） |
 | **P6** | `telegram` + 转发接口 | 卡片「下载」真的发到 TG；`per_post` 批量可用 |
 | **P7** | `emby` + 匹配 + 同步 | 角标按番号正确显示，`START-62`/`START-624` 不误判 |
 | **P8** | `scheduler` + 健康检查 + TG 告警 | 无人值守跑 7 天无人工介入 |

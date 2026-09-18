@@ -530,7 +530,13 @@
   /* app.js 的 toast 供 collect.js 复用（全局单例只有这一个 UI 出口） */
   window.toast = toast;
 
-  boot();
+  /* ★ 经门禁启动（S-6）：未认证时先让用户输密码，认证后再取数。
+     门禁未启用时 gate.start 会立即回调，行为与直接 boot() 一致。 */
+  if (window.gate && window.gate.start) {
+    window.gate.start(boot);
+  } else {
+    boot();
+  }
 
   // 调试入口
   window.__archive = {

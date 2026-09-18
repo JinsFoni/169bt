@@ -14,6 +14,29 @@
 
 <div class="grain" aria-hidden="true"></div>
 
+<!-- 访问门禁（S-6）。★ 这不是安全边界——真正的校验在后端
+     （api/gate.py）。这里只是「把该输密码的界面给出来」。 -->
+<div class="gate" id="gate" hidden>
+  <form class="gate-card" id="gateForm" autocomplete="on">
+    <div class="gate-mark" aria-hidden="true"></div>
+    <h1 class="gate-title">需要访问密码</h1>
+    <p class="gate-sub">此归档台已启用访问门禁。</p>
+
+    <label class="field">
+      <span class="field-label">访问密码</span>
+      <input class="input" id="gatePass" type="password" name="password"
+             autocomplete="current-password" placeholder="请输入访问密码"
+             aria-describedby="gateError">
+    </label>
+
+    <p class="gate-error" id="gateError" role="alert" hidden></p>
+
+    <button class="btn btn-primary gate-submit" id="gateSubmit" type="submit">
+      进入
+    </button>
+  </form>
+</div>
+
 <header class="topbar">
   <div class="topbar-inner">
 
@@ -395,6 +418,7 @@
 <div class="toast-stack" id="toastStack" aria-live="polite"></div>
 
 <script src="api.js"></script>
+<script src="gate.js"></script>
 <script src="app.js"></script>
 <script src="settings.js"></script>
 <script src="collect.js"></script>

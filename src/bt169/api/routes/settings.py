@@ -7,13 +7,17 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from bt169.api.deps import get_settings
+from bt169.api.auth import GATE_KEY, revoke_all_sessions
+from bt169.api.deps import get_db, get_settings
 from bt169.config import (
+    PLACEHOLDER,
     SETTINGS_SECTIONS,
     ConfigError,
     parse_rss_url,
     section_key,
 )
+from bt169.crypto import hash_password
+from bt169.db import Database
 from bt169.repo.settings import SettingsRepo
 
 router = APIRouter(tags=["settings"])
@@ -48,6 +52,7 @@ def read_settings(sr: SettingsRepo = Depends(get_settings)) -> dict[str, Any]:
 def write_settings(
     patch: SettingsPatch,
     sr: SettingsRepo = Depends(get_settings),
+    db: Database = Depends(get_db),
 ) -> dict[str, Any]:
     """保存一个分区的设置。
 
@@ -81,6 +86,16 @@ def write_settings(
                     status_code=400,
                     detail={"code": "bad_rss_url", "message": str(exc)},
                 ) from exc
+        # ★ 访问密码必须哈希后落库（S-6 / ADR-17）。
+        #   漏掉这一步，门禁就退化成明文比对——而且明文会躺在库里。
+        #
+        # ★★ 但**占位符必须在哈希之前排掉**：前端每次保存都会把密钥
+        #    字段回传成 ``••••••••``。若先哈希，占位符就变成一个合法
+        #    的哈希写进库，用户只是点了一下保存、什么都没改，访问密码
+        #    就被换掉了——再也进不来。哈希是**不可逆**的，这个错误
+        #    没有任何补救余地。
+        if storage == GATE_KEY and value and value != PLACEHOLDER:
+            value = hash_password(value)
         if value == "":
             to_delete.append(storage)
         else:
@@ -89,6 +104,17 @@ def write_settings(
     skipped = sr.put_many(to_write)
     for storage in to_delete:
         sr.delete(storage)
+
+    # ★ 改了访问密码就踢掉所有设备：否则「改密码」在安全上是空的，
+    #   任何拿过 cookie 的人照样能用到 30 天后。
+    #
+    # ★★ 必须排除「只回传了占位符」的情况——那种情况下什么都没改，
+    #    把人踢下线纯属误伤（用户会看到自己莫名被登出）。
+    gate_changed = (GATE_KEY in to_delete) or (
+        GATE_KEY in to_write and GATE_KEY not in skipped
+    )
+    if gate_changed:
+        revoke_all_sessions(db)
 
     def _bare(k: str) -> str:
         return k.partition(".")[2]

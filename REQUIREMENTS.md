@@ -197,7 +197,7 @@ GET https://169bt.com/forum.php?mod=forumdisplay&fid=192&orderby=dateline&page=N
 | S-3 | 分区 | **站点** / 基础设置 / 网络代理 / Emby / Telegram（共 **5** 个） |
 | S-4 | 只显示当前分区的配置项 | 切换分区不串显其他分区字段 |
 | S-5 | **每个分区各有独立保存按钮** | 各自保存、各自反馈 |
-| S-6 | 基础设置 | 访问密码 |
+| S-6 | 基础设置 | 访问密码（**后端校验**：PBKDF2 哈希 + 会话 token）✅ |
 | S-7 | 网络代理 | 类型（HTTP/HTTPS/SOCKS5）/ 地址 / 端口 / 用户名 / 密码 |
 | S-8 | Emby | 服务器地址、API Key、用户、媒体库 |
 | S-9 | Telegram | Bot Token、Chat ID |
@@ -312,6 +312,8 @@ GROUP BY post_date ORDER BY post_date DESC;
 | POST | `/api/settings/test/emby` | 测试 Emby 连通性 |
 | POST | `/api/settings/test/telegram` | 测试 TG Bot 连通性 |
 | POST | `/api/auth/login` | 访问密码校验 |
+| POST | `/api/auth/logout` | 登出（撤销当前会话） |
+| GET | `/api/auth/me` | 当前认证状态 |
 
 ---
 
@@ -330,7 +332,7 @@ GROUP BY post_date ORDER BY post_date DESC;
 | **TG 转发失败 / Bot 被限流** | 🟡 中 | 429 退避重试；失败时保持 `tg_sent_at=NULL` 以便重发；不阻塞采集 |
 | Emby 库庞大导致核对慢 | 🟢 低 | 只拉 `IncludeItemTypes=Movie` 的 `Name`/`Path`，本地建番号索引并缓存 |
 | **番号匹配误判** | 🟡 中 | 番号用**边界**匹配（避免 `START-62` 命中 `START-624`）；大小写归一 |
-| 访问密码明文 / 前端门禁 | 🟡 中 | 前端门禁**非安全边界**；后端就绪后改为服务端校验 + 密码哈希 |
+| 访问密码明文 / 前端门禁 | ✅ 已解决 | **已实现服务端校验**（`api/gate.py` + `api/auth.py`）：PBKDF2-SHA256 哈希、会话 token 只存哈希、`/api/*` 与 `/img/*` 强制认证。前端遮罩仅作界面，非安全边界 |
 
 ---
 
@@ -489,8 +491,7 @@ ed2k      : ed2k://|file|s169bbs.com@START-624_[4K].mkv|7515146184|0B17E95CBBA18
 
 | 缺口 | 说明 |
 |---|---|
-| 采集需登录会话 | 13 帖均停在 `pending`（无会话 → 无法感谢解锁）。需真实凭据实测登录 POST 与感谢解锁的完整链路 |
-| 访问门禁未生效 | 访问密码已可保存，但**校验尚未接上** |
+| 采集需登录会话 | 13 帖均停在 `pending`（无会话 → 无法感谢解锁）。需真实凭据实测感谢解锁的完整链路 |
 | Emby 媒体库下拉 | 只有「保存后加载」占位（无接口无法填选项） |
 | 无「测试连接」 | Emby / TG 连通性测试需后端代理（CORS） |
 | 顶栏「下载本日」 | 有按钮（`#dlDay`），但**未绑定任何事件**，为占位 |

@@ -1160,3 +1160,66 @@ window.__archive = {
 | 设置 | `GET`/`PUT /api/settings`，5 分区，密码回显占位符 |
 | 静态分发 | FastAPI `StaticFiles(directory="ui", html=True)` |
 | 反代 | Lucky 须注入 `X-Forwarded-Proto: https`（否则 SW/manifest 失败） |
+
+---
+
+## 20. 访问门禁（S-6）
+
+### 20.1 定位：**不是安全边界**
+
+`gate.js` 只负责「把该输密码的界面给出来」。真正的校验在
+`api/gate.py`：`/api/*`（除 `/api/auth/*` 与 `/api/health`）与
+`/img/*` 未认证一律 401。
+
+> 把 `gate.js` 整个删掉，也拿不到任何数据——只是没有输入框而已。
+> 这正是需求 §8.13 的结论：前端门禁不是边界，后端才是。
+
+### 20.2 启动流程
+
+```
+页面加载
+  └─ gate.start(boot)
+       ├─ GET /api/auth/me
+       │    ├─ authenticated → hide() + boot()
+       │    └─ 否则 → show()（聚焦密码框，暂停取数）
+       └─ 探测失败 → 直接 boot()
+```
+
+| 决定 | 理由 |
+|---|---|
+| **由 gate 决定 app.js 何时启动** | 若 app.js 先跑，未认证时会收到 401 并弹「无法连接后端」——用户以为服务挂了，实际只是要输密码 |
+| 探测失败**不弹门禁** | 后端没起来时弹密码框会误导；交给 app.js 报真正的错 |
+| 门禁关闭时**不显示遮罩** | 没有密码就没有边界，把人挡在不存在的门外只会困惑 |
+| 401 → 「访问密码错误」；其余 → 如实转述 | 超时/离线说成「密码错误」会让人反复试密码 |
+| 回车可提交（`<form>` + submit） | 输密码场景下回车是肌肉记忆 |
+| 错误区 `role="alert"` + `aria-invalid` | 屏幕阅读器需要知道校验失败 |
+
+### 20.3 z-index
+
+门禁 **130** > toast 120 > 采集 110 > 设置 100 > 灯箱 90。
+
+门禁是唯一的前置条件——任何 toast 都不该盖在密码框上。
+
+### 20.4 与 `api.js` 的关系
+
+门禁新增三个调用，**仍然只有 `api.js` 出现 `fetch(`**（FRONTEND.md §3 硬边界）：
+
+```js
+api.getAuthMe()        // GET  /api/auth/me
+api.login(password)    // POST /api/auth/login
+api.logout()           // POST /api/auth/logout
+```
+
+`api.js` 的 `credentials: 'same-origin'` 保证 cookie 随请求发送——
+这是门禁能生效的前提。
+
+### 20.5 实测结论
+
+| 项 | 结果 |
+|---|---|
+| 功能（Playwright） | **19/19** |
+| 布局（6 视口，含 320×568） | **28/28** |
+| 对比度（WCAG AA） | **5/5**（最低 5.11:1） |
+| 同源写操作未被 CSRF 误拦 | **3/3**（collect / delete / settings） |
+| 门禁关闭时正常进入 | **4/4** |
+

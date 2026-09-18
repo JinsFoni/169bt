@@ -89,6 +89,14 @@
     request: request,
 
     getHealth: function () { return request('GET', '/api/health'); },
+
+    // ---- 访问门禁（S-6）
+    getAuthMe: function () { return request('GET', '/api/auth/me'); },
+    login: function (password) {
+      return request('POST', '/api/auth/login', { password: password });
+    },
+    logout: function () { return request('POST', '/api/auth/logout'); },
+
     getDates: function () { return request('GET', '/api/dates'); },
     getPosts: function (date) {
       return request('GET', '/api/posts?date=' + encodeURIComponent(date));

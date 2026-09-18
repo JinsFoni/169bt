@@ -280,3 +280,72 @@ def test_collect_progress_callback_gets_job(tmp_path, monkeypatch):
     db.close()
 
     assert seen == [(1, 2), (2, 2)], f"进度回调应逐帖触发，实际 {seen}"
+
+
+# ------------------------------------------------------------ doctor: 门禁
+
+
+def test_doctor_reports_gate_disabled(tmp_path, monkeypatch, capsys):
+    """★ 门禁状态必须显式可见——「未启用」是安全相关的信息。"""
+    import bt169.config as config
+    from bt169.__main__ import _cmd_doctor
+
+    # ★ 不 patch UI_DIR：doctor 会检查它，指向不存在的目录会返回 1。
+    #   沿用 test_doctor_command 的做法（只改数据目录相关常量）。
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "x.db")
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "IMAGE_DIR", tmp_path / "images")
+
+    assert _cmd_doctor() == 0
+    out = capsys.readouterr().out
+    assert "访问门禁" in out
+    assert "未启用" in out
+
+
+def test_doctor_reports_gate_enabled_and_sessions(tmp_path, monkeypatch, capsys):
+    import bt169.config as config
+    from bt169.api.auth import create_session, set_access_password
+    from bt169.__main__ import _cmd_doctor, _load_or_create_key
+    from bt169.crypto import SecretBox
+    from bt169.db import Database
+    from bt169.repo.settings import SettingsRepo
+
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "x.db")
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "IMAGE_DIR", tmp_path / "images")
+
+    db = Database(config.DB_PATH)
+    db.migrate()
+    box = SecretBox(b"\x09" * 32)
+    set_access_password(SettingsRepo(db, box), "x")
+    create_session(db)
+    create_session(db)
+    db.close()
+
+    # _load_or_create_key 读 config.DATA_DIR 下的密钥文件
+    monkeypatch.setattr("bt169.__main__._load_or_create_key", lambda: box)
+
+    assert _cmd_doctor() == 0
+    out = capsys.readouterr().out
+    assert "已启用" in out
+    assert "面板会话 2" in out
+
+
+def test_cleanup_sessions_removes_expired(db, box):
+    """过期会话要被清掉，否则表无限增长。"""
+    from datetime import datetime, timedelta
+
+    from bt169.api.auth import cleanup_sessions, create_session
+
+    create_session(db)
+    create_session(db)
+    past = (datetime.now().astimezone() - timedelta(days=1)).isoformat(
+        timespec="seconds"
+    )
+    with db.write() as c:
+        c.execute(
+            "UPDATE panel_sessions SET expires_at=? WHERE id=1", (past,)
+        )
+    assert cleanup_sessions(db) == 1
+    left = db.read().execute("SELECT COUNT(*) FROM panel_sessions").fetchone()[0]
+    assert left == 1

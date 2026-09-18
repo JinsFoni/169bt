@@ -308,6 +308,40 @@ def _image_checks(db) -> list[tuple[str, bool, str, str]]:  # type: ignore[no-un
     return out
 
 
+def _auth_checks(db) -> list[tuple[str, bool, str, str]]:  # type: ignore[no-untyped-def]
+    """访问门禁与面板会话状态（S-6）。"""
+    from bt169.api.auth import cleanup_sessions
+
+    checks: list[tuple[str, bool, str, str]] = []
+
+    row = db.read().execute(
+        "SELECT value FROM settings WHERE key='basic.password'"
+    ).fetchone()
+    gate_on = row is not None and bool(row["value"])
+    checks.append((
+        "访问门禁",
+        True,                      # 开与关都是合法状态
+        "",
+        "已启用（API 与 /img 需要密码）" if gate_on else "未启用（任何人可访问）",
+    ))
+
+    if gate_on:
+        sessions = db.read().execute(
+            "SELECT COUNT(*) FROM panel_sessions"
+        ).fetchone()[0]
+        checks.append((
+            f"面板会话 {sessions}", True, "",
+            "无已登录设备" if sessions == 0 else "有效设备数（含手机）",
+        ))
+        expired = cleanup_sessions(db)
+        if expired:
+            checks.append((
+                f"清理过期会话 {expired}", True, "", "已删除",
+            ))
+
+    return checks
+
+
 def _cmd_doctor() -> int:
     """环境自检。所有检查项都实测，不做假设。"""
     import sqlite3
@@ -358,6 +392,7 @@ def _cmd_doctor() -> int:
         n = db.read().execute("SELECT COUNT(*) FROM posts").fetchone()[0]
         checks.append((f"帖子总数 {n}", True, "", ""))
         checks.extend(_image_checks(db))
+        checks.extend(_auth_checks(db))
     except Exception as exc:
         checks.append(("数据库可用", False, str(exc), ""))
     finally:

@@ -1177,3 +1177,95 @@ select.input {
     transition-duration: .01ms !important;
   }
 }
+
+/* ==========================================================================
+   访问门禁（S-6）
+   --------------------------------------------------------------------------
+   居中悬浮卡片，与设置面板同一套视觉语言（深底 + 细边框 + 大阴影）。
+   z-index 130：**高于 toast（120）**——门禁是唯一的前置条件，任何
+   toast 都不该盖在密码框上。
+   ========================================================================== */
+
+.gate {
+  position: fixed;
+  inset: 0;
+  z-index: 130;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--ink-900);
+}
+
+/* 细网格底纹：与主界面的 grain 呼应，避免整块纯黑显得像加载失败 */
+.gate::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(var(--line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--line) 1px, transparent 1px);
+  background-size: 44px 44px;
+  opacity: .28;
+  pointer-events: none;
+}
+
+.gate-card {
+  position: relative;
+  z-index: 1;
+  width: min(380px, 100%);
+  padding: 30px 28px 26px;
+  border-radius: var(--r-card);
+  background: var(--ink-800);
+  border: 1px solid var(--line-strong);
+  box-shadow: var(--sh-float);
+  animation: modalIn .26s var(--ease);
+}
+
+.gate-mark {
+  width: 34px;
+  height: 34px;
+  margin-bottom: 18px;
+  border-radius: 9px;
+  background: var(--brass);
+  /* 中间挖一个方孔，与 favicon 的几何呼应 */
+  box-shadow: inset 0 0 0 10px var(--ink-800);
+}
+
+.gate-title {
+  margin: 0 0 6px;
+  font-family: var(--font-display);
+  font-size: 21px;
+  font-weight: 600;
+  letter-spacing: -.01em;
+  color: var(--text);
+}
+
+.gate-sub {
+  margin: 0 0 22px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-dim);
+}
+
+.gate-error {
+  margin: 10px 0 0;
+  font-size: 12.5px;
+  color: var(--danger);
+}
+
+.gate-submit {
+  width: 100%;
+  height: 40px;
+  margin-top: 20px;
+}
+
+.gate-submit:disabled {
+  opacity: .6;
+  cursor: default;
+}
+
+@media (max-width: 560px) {
+  .gate { padding: 16px; }
+  .gate-card { padding: 26px 22px 22px; }
+}
+

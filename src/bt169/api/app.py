@@ -45,9 +45,22 @@ def create_app(
 
     _install_error_handler(app)
 
-    from bt169.api.routes import collect, health, posts, settings, status
+    from bt169.api.gate import GateMiddleware
+    from bt169.api.routes import (
+        auth,
+        collect,
+        health,
+        posts,
+        settings,
+        status,
+    )
+
+    # 门禁中间件包裹整个应用（与路由注册顺序无关）；放在 include_router
+    # 之前只是为了阅读顺序：先立边界，再挂内容。
+    app.add_middleware(GateMiddleware)
 
     app.include_router(health.router)
+    app.include_router(auth.router)
     app.include_router(posts.router)
     app.include_router(settings.router)
     app.include_router(collect.router)
