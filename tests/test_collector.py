@@ -199,19 +199,28 @@ def test_skips_existing_posts(env):
     assert result.collected == 1
 
 
-def test_skips_existing_regardless_of_status(env):
-    """已存在的失败帖也跳过（不自动重试历史失败）。"""
+def test_pending_post_is_not_skipped(env):
+    """★ 未完成的帖**不**跳过——旧行为是「任意状态都跳」，那是死路。
+
+    这个测试原叫 ``test_skips_existing_regardless_of_status``，断言的正是
+    后来害用户卡死的规则。改成新语义：``pending`` 是未完成，必须重试。
+
+    详见 ``test_pending_post_is_retried_when_session_becomes_available``。
+    """
     db, posts, jobs = env
     posts.upsert_collected(
-        tid=101, title="失败过", code=None, actress=None, release_date=None,
+        tid=101, title="未解锁", code=None, actress=None, release_date=None,
         size=None, cover_img=None, detail_img=None, ed2k=None,
-        post_date="2026-09-14", status="failed",
+        post_date="2026-09-14", status="pending",
     )
-    fc = FakeForum(pages={1: rows((101, "2026-09-14"))})
+    fc = FakeForum(pages={1: rows((101, "2026-09-14"))},
+                   details={101: make_detail(101)})
     c = Collector(client=fc, posts=posts, jobs=jobs)  # type: ignore[arg-type]
     result = c.run(from_date="2026-09-14", to_date="2026-09-14")
-    assert fc.fetch_calls == []
-    assert result.skipped == 1
+
+    assert fc.fetch_calls == [101], "pending 帖必须被重抓"
+    assert result.skipped == 0
+    assert result.collected == 1
 
 
 def test_rerun_overwrites_failed_post(env):
@@ -801,3 +810,104 @@ def test_repair_fixes_wrong_width(env):
         from_date="2026-09-14", to_date="2026-09-14")
     assert posts.get(101).detail_local.endswith("-1200.webp"), "必须纠正宽度"
     assert posts.get(101).cover_local.endswith("-600.webp"), "封面不该被改成 1200"
+
+
+# ------------------------------------------- ★ 已入库但未完成的帖子必须能重试
+#
+# 实测事故（用户真实遇到）：13 个帖子在**没有登录会话**时被采成 `pending`
+# （匿名访问详情页拿不到 ed2k，感谢解锁也没会话可用）。用户随后配好了
+# 账号密码、会话可用，再跑采集 —— **一个都没变成 `done`**，App 依旧空白。
+#
+# 根因是两条规则叠加成死路：
+#
+#   1. 跳过规则是「tid 已入库就跳过（**任意状态**）」
+#   2. 会话失效时采集器只把帖子标成 `pending` 就完事
+#
+# 于是 `pending` 的帖子既不会被重采（规则 1），也没有任何别的路径会去
+# 处理它 —— **永久卡死**。用户唯一的出路是手动删掉再重采，而前端按
+# `BROWSABLE_STATUSES` 过滤，`pending` 在界面上**根本看不见**，
+# 连「删掉重来」都做不到。
+#
+# ★ 跳过规则的**本意**是「省掉重复抓取」，不是「放弃未完成的帖子」。
+#   需求 C-2 说「已入库的跳过」，而 C-8 明确要求「失败可重试」。
+#   正确语义：`done` / `nolink` 是**终态**（有结论了，跳过）；
+#   `pending` / `failed` / `thanked` 是**未完成**（该重试）。
+
+
+def test_pending_post_is_retried_when_session_becomes_available(env):
+    """★ 核心场景：pending 帖在会话可用后必须能被采成 done。
+
+    这正是用户遇到的：先匿名采成 pending，配好凭据后重采却毫无变化。
+    """
+    db, posts, jobs = env
+    posts.upsert_collected(
+        tid=101, title="旧标题", code="START-001", actress="A",
+        release_date="2026-09-01", size="7GB",
+        cover_img=None, detail_img=None, ed2k=None,
+        post_date="2026-09-14", status="pending",
+    )
+    assert posts.get(101).status == "pending"
+
+    fc = FakeForum(pages={1: rows((101, "2026-09-14"))},
+                   details={101: make_detail(101, ed2k=True)})
+    c = Collector(client=fc, posts=posts, jobs=jobs)  # type: ignore[arg-type]
+    result = c.run(from_date="2026-09-14", to_date="2026-09-14")
+
+    assert posts.get(101).status == "done", (
+        "pending 帖在有会话时重采必须变 done——否则永久卡死"
+    )
+    assert posts.get(101).ed2k, "重采必须写入 ed2k"
+    assert result.collected == 1, "重试的帖应算作已采集，不是跳过"
+
+
+def test_failed_post_is_retried(env):
+    """★ C-8「失败可重试」：failed 帖必须能被重采。"""
+    db, posts, jobs = env
+    posts.upsert_collected(
+        tid=101, title="旧", code="START-001", actress=None,
+        release_date=None, size=None, cover_img=None, detail_img=None,
+        ed2k=None, post_date="2026-09-14", status="failed",
+    )
+    fc = FakeForum(pages={1: rows((101, "2026-09-14"))},
+                   details={101: make_detail(101, ed2k=True)})
+    c = Collector(client=fc, posts=posts, jobs=jobs)  # type: ignore[arg-type]
+    c.run(from_date="2026-09-14", to_date="2026-09-14")
+    assert posts.get(101).status == "done"
+
+
+def test_done_post_still_skipped(env):
+    """★ 反向：终态必须仍然跳过——C-2 增量去重的本意不能丢。
+
+    否则每轮采集都会重抓所有历史帖子，白白消耗限速预算与封号风险。
+    """
+    db, posts, jobs = env
+    posts.upsert_collected(
+        tid=101, title="已完成", code="START-001", actress=None,
+        release_date=None, size=None, cover_img=None, detail_img=None,
+        ed2k="ed2k://|file|x.mkv|1|AA|/", post_date="2026-09-14",
+        status="done",
+    )
+    fc = FakeForum(pages={1: rows((101, "2026-09-14"))},
+                   details={101: make_detail(101, ed2k=True)})
+    c = Collector(client=fc, posts=posts, jobs=jobs)  # type: ignore[arg-type]
+    result = c.run(from_date="2026-09-14", to_date="2026-09-14")
+
+    assert posts.get(101).title == "已完成", "终态帖不该被重抓覆盖"
+    assert result.skipped == 1
+    assert fc.fetch_calls == [], "终态帖不该产生详情页请求（浪费限速预算）"
+
+
+def test_nolink_post_still_skipped(env):
+    """★ nolink 也是终态：已确认无链接，重抓没有意义。"""
+    db, posts, jobs = env
+    posts.upsert_collected(
+        tid=101, title="无链接", code="START-001", actress=None,
+        release_date=None, size=None, cover_img=None, detail_img=None,
+        ed2k=None, post_date="2026-09-14", status="nolink",
+    )
+    fc = FakeForum(pages={1: rows((101, "2026-09-14"))},
+                   details={101: make_detail(101, ed2k=True)})
+    c = Collector(client=fc, posts=posts, jobs=jobs)  # type: ignore[arg-type]
+    result = c.run(from_date="2026-09-14", to_date="2026-09-14")
+    assert result.skipped == 1
+    assert fc.fetch_calls == []

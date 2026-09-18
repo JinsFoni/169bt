@@ -217,7 +217,13 @@ class Collector:
                                   message=f"已取消（已处理 {done} 个）")
                 return self._summarize(job.id)
 
-            if self._posts.exists(tid):
+            if self._posts.is_settled(tid):
+                # ★ 只跳过**终态**（done / nolink）。
+                #   早先用 ``exists()``（任意状态都跳），配上「会话失效时
+                #   只标 pending」就成了一条死路：实测 13 帖匿名采成 pending
+                #   后，配好凭据重采**一个都不会变**，而 pending 又不在前端
+                #   展示范围内，连手动删掉重来都做不到。
+                #
                 # ★ 已入库的帖子也要顺带修图：用户可能删过 data/images/，
                 #   而帖子本身在库里 → 单看「tid 已存在」会永远跳过它，
                 #   本地图路径就永久指向不存在的文件（前端裂图）。

@@ -5,7 +5,12 @@ from __future__ import annotations
 from datetime import datetime
 
 from bt169.db import Database
-from bt169.models import BROWSABLE_STATUSES, VALID_STATUSES, Post
+from bt169.models import (
+    BROWSABLE_STATUSES,
+    SETTLED_STATUSES,
+    VALID_STATUSES,
+    Post,
+)
 
 __all__ = ["PostRepo", "now_iso"]
 
@@ -45,13 +50,37 @@ class PostRepo:
     def exists(self, tid: int) -> bool:
         """tid 是否已入库（**任意状态**）。
 
-        采集的跳过规则是「数据库里有的就跳过」，与状态无关。
         用 ``SELECT 1 ... LIMIT 1`` 而非 ``COUNT(*)``：走主键索引即返回。
+
+        ★ 注意：**跳过采集不该用这个**。它回答的是「库里有没有」，
+        而采集要问的是「这个帖还有没有活要干」——见 :meth:`is_settled`。
         """
         row = self._db.read().execute(
             "SELECT 1 FROM posts WHERE tid=? LIMIT 1", (tid,)
         ).fetchone()
         return row is not None
+
+    def is_settled(self, tid: int) -> bool:
+        """tid 是否已**处理完毕**（终态，采集可以跳过）。
+
+        终态 = ``done``（拿到 ed2k）或 ``nolink``（确认无链接）。
+        其余状态（``pending`` / ``failed`` / ``thanked``）都是**未完成**，
+        应该重试。
+
+        ★ 为什么需要它：早先采集用 ``exists()`` 判断跳过，结果是
+        「tid 在库里就跳过，不管状态」。这本身没错，但配上「会话失效时
+        只标 pending」就成了一条死路——实测：13 帖在没会话时被采成
+        ``pending``，用户配好凭据后重采，**一个都不会变**。而且前端只
+        展示终态帖，``pending`` 在界面上看不见，连手动删掉重来都做不到。
+
+        ★ 需求依据：C-2「已入库的跳过」说的是**省掉重复抓取**，
+        C-8 则明确要求「失败可重试」。两者只能这样调和：
+        有结论的跳过，没结论的重试。
+        """
+        row = self._db.read().execute(
+            "SELECT status FROM posts WHERE tid=? LIMIT 1", (tid,)
+        ).fetchone()
+        return row is not None and row[0] in SETTLED_STATUSES
 
     def existing_tids(self, tids: list[int]) -> set[int]:
         """批量查询哪些 tid 已存在。

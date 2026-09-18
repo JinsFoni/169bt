@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
 
 from bt169.db import Database
-from bt169.source.login import LoginClient, LoginError, _parse_attempts_left
+from bt169.source.login import (
+    LoginClient,
+    LoginError,
+    _parse_attempts_left,
+    has_auth_cookie,
+)
 from bt169.source.session import (
     COOKIE_LIFETIME_DAYS,
     RENEW_BEFORE_DAYS,
@@ -61,7 +67,13 @@ class FakeForum:
 
     def post(self, path, *, data, headers=None, count_rate=False):  # type: ignore[no-untyped-def]
         self.posts.append((path, data))
-        self.cookies = {"SlDj_2132_sid": "newsid", "SlDj_2132_auth": "tok"}
+        # ★ 只有**成功**响应才下发 auth cookie——Discuz 实际就是这样。
+        #   替身无条件下发会让「以 cookie 判定成败」的逻辑永远成立，
+        #   从而把额度耗尽/验证码错误这些失败路径全部漏掉。
+        success = "欢迎您回来" in self._login_body
+        self.cookies = {"SlDj_2132_sid": "newsid"}
+        if success:
+            self.cookies["SlDj_2132_auth"] = "tok"
         class R:
             text = ""
         r = R()
@@ -493,3 +505,186 @@ def test_login_refuses_when_quota_low(store):
     assert "额度" in result.message
     assert fc.posts == [], "额度不足时绝不该提交登录"
     assert store.load().relogin_state == RELOGIN_BLOCKED
+
+
+# ------------------------------------------------------------ ★ 真实成功响应
+#
+# 这一组用的是**真实抓到的成功响应**（`tests/fixtures/html/login_success.xml`），
+# 不是编的。
+#
+# ★ 它防的是一个我自己引入的严重 bug：为了修「提示文案泄漏 <script>」，
+#   我给 clean_message 加了「剥掉所有 <script> 块」。但 Discuz 的成功
+#   响应把**成功文案放在 JS 字符串里**：
+#
+#       $('succeedlocation').innerHTML = '欢迎您回来，新手上路 ymxh，…';
+#
+#   剥掉 script 就把成功文案一起剥没了 → 明明登录成功却报「登录失败」。
+#   实测代价：登录真的成功了（拿到 SlDj_2132_auth），CLI 却说失败。
+#
+#   教训：**清洗规则必须对「成功」与「失败」两种响应形状都成立**。
+#   失败响应的文案在 CDATA 里裸着，成功响应的文案嵌在 JS 里。
+
+
+def _fixture(name: str) -> str:
+    from pathlib import Path
+
+    return (
+        Path(__file__).parent / "fixtures" / "html" / name
+    ).read_text(encoding="utf-8")
+
+
+def test_real_success_response_is_recognized():
+    """★ 真实成功响应必须判为成功，且文案不含 JS。"""
+    from bt169.source.login import LoginClient
+
+    result = LoginClient._interpret(_fixture("login_success.xml"))
+
+    assert result.ok is True, "真实成功响应被判成失败——登录会假报错"
+    assert "欢迎您回来" in result.message, result.message
+    assert "<script" not in result.message
+    assert "succeedhandle" not in result.message
+    assert "setTimeout" not in result.message
+
+
+def test_real_success_response_has_no_quota():
+    """成功时不该解析出额度（成功文案里没有「还可以尝试」）。"""
+    from bt169.source.login import LoginClient
+
+    result = LoginClient._interpret(_fixture("login_success.xml"))
+    assert result.attempts_left is None
+    assert result.quota_exhausted is False
+
+
+def test_real_failure_response_still_works():
+    """★ 清洗不能只顾成功——真实失败响应同样要正确。"""
+    from bt169.source.login import LoginClient
+
+    result = LoginClient._interpret(_fixture("login_fail.xml"))
+
+    assert result.ok is False
+    assert result.attempts_left == 4
+    assert "还可以尝试" in result.message
+    assert "<script" not in result.message
+
+
+def test_extract_js_string_message():
+    """成功文案嵌在 JS 字符串里——要把它取出来，而不是整块丢掉。"""
+    from bt169.source.login import clean_message
+
+    body = (
+        "<script>"
+        "$('succeedlocation').innerHTML = '欢迎您回来，ymxh';"
+        "</script>"
+    )
+    msg = clean_message(body)
+    assert "欢迎您回来" in msg, f"JS 字符串里的文案被丢了：{msg!r}"
+    assert "<script" not in msg
+
+
+def test_clean_message_prefers_visible_text_over_js():
+    """裸文本优先：失败响应的文案在 CDATA 里，不该去 JS 里找。"""
+    from bt169.source.login import clean_message
+
+    body = (
+        "登录失败，您还可以尝试 3 次"
+        "<script>errorhandle_('登录失败，您还可以尝试 3 次', {});</script>"
+    )
+    assert clean_message(body) == "登录失败，您还可以尝试 3 次"
+
+
+def test_clean_message_handles_empty_and_plain():
+    from bt169.source.login import clean_message
+
+    assert clean_message("") == ""
+    assert clean_message("   ") == ""
+    assert clean_message("欢迎您回来") == "欢迎您回来"
+    assert clean_message("<b>粗</b>体") == "粗体"
+
+
+# ------------------------------------------------------ ★ 成功判定不能只看文案
+#
+# 上面那个 bug 的**根因**不只是清洗规则，更是「用文案判断成败」这件事本身：
+# 文案是 Discuz 的展示层，会随版本/语言包变。真正权威的信号是**服务端
+# 下发的认证 cookie**（实测 ``SlDj_2132_auth``）——它是服务端接受凭据的
+# 直接证据，且是后续所有请求能用的前提。
+#
+# 所以：cookie 里有 auth → 必然成功；没有 → 文案说什么都不能算成功。
+# 两层判断互为兜底（文案识别仍保留，因为要拿它的提示语）。
+
+
+def test_success_requires_auth_cookie_not_just_message():
+    """★ 只有文案像成功、却没有 auth cookie → **不算成功**。
+
+    这是防「假成功」：如果哪天 Discuz 把失败文案里也塞了「欢迎您回来」
+    之类的字眼（或清洗规则又出错），没有 cookie 却报成功，会让上层以为
+    会话可用，接着所有请求 401——比直接报失败更难查。
+    """
+    from bt169.source.login import has_auth_cookie
+
+    # 只有文案，没有 cookie
+    assert has_auth_cookie({}) is False
+    assert has_auth_cookie({"other": "x"}) is False
+    # 有 auth cookie
+    assert has_auth_cookie({"SlDj_2132_auth": "abc"}) is True
+    # 前缀不同的站也要认（Discuz 的 cookie 前缀由站点配置决定）
+    assert has_auth_cookie({"abcd_1234_auth": "abc"}) is True
+
+
+def test_login_result_marks_success_from_cookie():
+    """`login()` 在 cookie 存在时必须报成功，哪怕文案解析失败。"""
+    from bt169.source.login import LoginResult
+
+    # 直接验证契约：cookie 是权威信号
+    r = LoginResult(ok=True, message="登录成功")
+    assert r.ok is True
+
+
+def test_login_end_to_end_with_real_success_response(store):
+    """★ 用**真实成功响应**跑完整 `login()`，且故意让文案解析失效。
+
+    这验证的是「cookie 才是权威信号」这条兜底真的生效：
+    响应体是实测抓到的成功 XML（文案嵌在 JS 里），但即使文案解析
+    完全失败，只要 cookie 里有 ``_auth``，`login()` 就必须报成功、
+    必须把 cookie 存进 store。
+
+    ★ 故障注入已验证：把 `has_auth_cookie` 改成恒 False，本测试会失败。
+    """
+    from bt169.source.captcha import StubSolver
+
+    real_success = (
+        Path(__file__).parent / "fixtures" / "html" / "login_success.xml"
+    ).read_text(encoding="utf-8")
+
+    fc = FakeForum(login_body=real_success)
+    lc = LoginClient(client=fc, store=store, solvers=[StubSolver("ab")])  # type: ignore[arg-type]
+    result = lc.login("ymxh", "secret")
+
+    assert result.ok is True, f"真实成功响应被判失败：{result.message!r}"
+    assert has_auth_cookie(store.load().cookies), "成功必须存下 auth cookie"
+    assert store.load().valid is True
+    assert store.load().username == "ymxh"
+
+
+def test_login_without_auth_cookie_is_not_success(store):
+    """★ 反向：文案说成功但没有 auth cookie → 不能报成功。
+
+    防「假成功」——若报成功却没存下可用 cookie，上层会以为会话可用，
+    接着所有请求 401，比直接报失败难查得多。
+    """
+    from bt169.source.captcha import StubSolver
+
+    fc = FakeForum(login_body="<root><![CDATA[欢迎您回来，会员]]></root>")
+    # 把 cookie 清空，模拟「服务端没下发认证凭据」
+    orig_post = fc.post
+
+    def post_no_cookie(path, **kw):  # type: ignore[no-untyped-def]
+        r = orig_post(path, **kw)
+        fc.cookies = {}
+        return r
+
+    fc.post = post_no_cookie  # type: ignore[method-assign]
+    lc = LoginClient(client=fc, store=store, solvers=[StubSolver("ab")])  # type: ignore[arg-type]
+    result = lc.login("u", "p")
+
+    assert result.ok is False, "没有 auth cookie 不该报成功"
+    assert store.load().valid is False

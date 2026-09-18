@@ -7,7 +7,8 @@ from dataclasses import asdict, dataclass, fields
 from typing import Any, Literal
 
 __all__ = [
-    "PostStatus", "VALID_STATUSES", "BROWSABLE_STATUSES", "Post", "PostDTO",
+    "PostStatus", "VALID_STATUSES", "BROWSABLE_STATUSES", "SETTLED_STATUSES",
+    "Post", "PostDTO",
 ]
 
 PostStatus = Literal["pending", "thanked", "done", "failed", "nolink"]
@@ -19,6 +20,17 @@ VALID_STATUSES: frozenset[str] = frozenset(
 
 #: 浏览视图只展示这些状态。
 BROWSABLE_STATUSES: frozenset[str] = frozenset({"done"})
+
+#: **终态**——已有结论，采集可以跳过。
+#:
+#: - ``done``：拿到 ed2k
+#: - ``nolink``：确认无链接（感谢了也没链接，或本来就不需要）
+#:
+#: 其余状态（``pending`` / ``thanked`` / ``failed``）都是**未完成**：
+#: 要么等解锁，要么等重试。★ 采集跳过只能用这个集合，不能用
+#: 「在不在库里」——否则未完成的帖会永久卡死（实测踩过，见
+#: ``PostRepo.is_settled`` 的说明）。
+SETTLED_STATUSES: frozenset[str] = frozenset({"done", "nolink"})
 
 
 @dataclass(frozen=True, slots=True)
