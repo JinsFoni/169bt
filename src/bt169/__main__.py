@@ -38,6 +38,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("migrate", help="建库 / 升级 schema")
     sub.add_parser("doctor", help="环境自检")
 
+    lg = sub.add_parser("login", help="登录论坛并保存会话（Cookie 30 天）")
+    lg.add_argument("--username", help="论坛用户名（默认读设置里的「站点」分区）")
+    lg.add_argument("--password", help="论坛密码（默认读设置）")
+
     c = sub.add_parser("collect", help="采集指定日期范围的帖子（前台运行）")
     c.add_argument("--from", dest="from_date", required=True,
                    metavar="YYYY-MM-DD", help="起始日期（含）")
@@ -64,6 +68,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_doctor()
     if args.command == "collect":
         return _cmd_collect(args)
+    if args.command == "login":
+        return _cmd_login(args)
     parser.print_usage(sys.stderr)
     return 2
 
@@ -95,6 +101,76 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             app, host=args.host, port=args.port,
             reload=args.reload, log_level="info",
         )
+    finally:
+        db.close()
+    return 0
+
+
+def _cmd_login(args: argparse.Namespace) -> int:
+    """登录论坛并保存 Cookie。
+
+    ★ **登录额度是稀缺资源**（5 次 / 900 秒，按 IP）。因此这里：
+
+    - 默认复用设置里已存的账号密码，避免命令行留下密码历史
+      （``--password`` 会进 shell history 与 ``ps`` 输出）
+    - 只在「预校验通过的验证码」上提交登录（额度保护，见 ARCHITECTURE §5.2）
+    - 额度耗尽时明确拒绝，**不重试**
+    """
+    from bt169.repo.settings import SettingsRepo
+    from bt169.source.captcha import PythonSolver
+    from bt169.source.forum import ForumClient
+    from bt169.source.login import LoginClient, LoginError, QuotaExhausted
+    from bt169.source.session import SessionStore
+
+    db = Database(config.DB_PATH)
+    try:
+        db.migrate()
+        box = _load_or_create_key()
+        settings = SettingsRepo(db, box)
+
+        username = args.username or settings.get(
+            config.section_key("site", "username")
+        )
+        password = args.password or settings.get(
+            config.section_key("site", "password")
+        )
+        if not username or not password:
+            print(
+                "缺少账号密码。请在 Web 设置面板的「站点」分区填写，"
+                "或用 --username/--password 传入。",
+                file=sys.stderr,
+            )
+            return 2
+
+        store = SessionStore(db)
+        client = ForumClient()
+        try:
+            lc = LoginClient(
+                client=client, store=store, solvers=[PythonSolver()]
+            )
+            print(f"登录 {username} …（验证码需解算，可能耗时几秒）")
+            result = lc.login(username, password)
+        except QuotaExhausted as exc:
+            print(f"登录额度已耗尽：{exc}", file=sys.stderr)
+            print("请等待 900 秒窗口重置后再试。", file=sys.stderr)
+            return 1
+        except LoginError as exc:
+            print(f"登录失败：{exc}", file=sys.stderr)
+            return 1
+        finally:
+            client.close()
+
+        if not result.ok:
+            print(f"登录失败：{result.message}", file=sys.stderr)
+            if result.attempts_left is not None:
+                print(f"剩余尝试次数：{result.attempts_left}", file=sys.stderr)
+            return 1
+
+        print(f"登录成功：{result.message}")
+        print(f"验证码解算 {result.captcha_images} 次")
+        session = store.load()
+        if session is not None:
+            print(f"会话有效期至：{session.expires_at}")
     finally:
         db.close()
     return 0

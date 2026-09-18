@@ -21,10 +21,12 @@ from dataclasses import dataclass
 from bt169.source.captcha import CaptchaSolver, Solver
 from bt169.source.forum import FetchError, ForumClient
 from bt169.source.session import (
+    RELOGIN_BLOCKED,
     RELOGIN_FAILED,
     RELOGIN_OK,
     RELOGIN_RETRYING,
     SessionStore,
+    can_attempt_login,
 )
 
 __all__ = ["LoginClient", "LoginResult", "LoginError", "QuotaExhausted"]
@@ -39,6 +41,28 @@ _FORMHASH_RE = re.compile(r'name="formhash" value="([^"]+)"')
 
 #: CDATA 内容。
 _CDATA_RE = re.compile(r"<!\[CDATA\[(.*?)\]\]>", re.S)
+
+#: Discuz 的 inajax 响应把**提示文案和一段回调脚本一起**塞进 CDATA。
+#: 实测响应形如::
+#:
+#:     登录失败，您还可以尝试 4 次<script type="text/javascript"
+#:     reload="1">if(typeof errorhandle_=='function') {
+#:     errorhandle_('登录失败，您还可以尝试 4 次', {'loginperm':'4'});}</script>
+#:
+#: 直接展示会把这坨 JS 糊到用户脸上（CLI 打印、前端 toast 都一样）。
+_SCRIPT_RE = re.compile(r"<script\b.*?</script>", re.S | re.I)
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def clean_message(text: str) -> str:
+    """剥掉响应里的脚本与标签，只留人类可读的提示。
+
+    保留正文、去掉 ``<script>`` 与其后的标签——文案本身（「还可以尝试
+    N 次」）是有用的，回调脚本不是。
+    """
+    text = _SCRIPT_RE.sub("", text)
+    text = _TAG_RE.sub("", text)
+    return text.strip()
 
 #: 服务端返回的额度耗尽文案。
 _QUOTA_MARKERS = ("尝试次数过多", "请 15 分钟后再试", "登录失败次数过多")
@@ -164,9 +188,18 @@ class LoginClient:
 
         ★ **先预校验验证码再提交**：实测提交错误验证码不消耗登录额度，
         因此可以把「猜验证码」的成本完全挡在额度之外。
+
+        ★ **额度保护**（ARCHITECTURE.md §5.2 规则 2/3）：提交前先查
+        :func:`can_attempt_login`。额度是稀缺资源（实测 5 次 / 900 秒，
+        按 IP 计），撞光了就得干等——所以宁可拒绝也不赌。
         """
         if not username or not password:
             raise LoginError("用户名与密码不能为空")
+
+        allowed, reason = can_attempt_login(self._store.load())
+        if not allowed:
+            self._store.set_relogin_state(RELOGIN_BLOCKED)
+            return LoginResult(ok=False, message=reason)
 
         self._store.set_relogin_state(RELOGIN_RETRYING)
         form = self._load_form()
@@ -236,7 +269,9 @@ class LoginClient:
         Discuz 的 inajax 响应把提示文本放在 CDATA 里。
         """
         m = _CDATA_RE.search(body)
-        text = (m.group(1) if m else body).strip()
+        # ★ 先剥脚本/标签再判断：否则 ``<script>`` 里的内容会污染
+        #   文案（实测用户看到的就是一整坨 JS）。
+        text = clean_message(m.group(1) if m else body)
         lowered = text.lower()
 
         # 成功：Discuz 返回「欢迎您回来」或直接是跳转脚本

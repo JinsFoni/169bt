@@ -9,13 +9,90 @@ from datetime import datetime, timedelta
 from bt169.db import Database
 from bt169.repo.posts import now_iso
 
-__all__ = ["ForumSession", "SessionStore", "COOKIE_LIFETIME_DAYS"]
+__all__ = [
+    "ForumSession",
+    "SessionStore",
+    "COOKIE_LIFETIME_DAYS",
+    "MAX_LOGIN_ATTEMPTS",
+    "SAFETY_MARGIN",
+    "LOGIN_WINDOW_SECONDS",
+    "MIN_SECONDS_BETWEEN_LOGIN",
+    "can_attempt_login",
+]
 
 #: 实测 Cookie 有效期（`cookietime=2592000` 秒 = 30 天）。
 COOKIE_LIFETIME_DAYS = 30
 
 #: 提前多少天开始主动续期（ARCHITECTURE.md §5.2.2）。
 RENEW_BEFORE_DAYS = 5
+
+#: 登录额度（ARCHITECTURE.md §5.2）。Discuz 默认按 IP 计 5 次 / 900 秒。
+MAX_LOGIN_ATTEMPTS = 5
+
+#: 永远留 1 次不打——最后 1 次是「用户手动救命」用的。
+SAFETY_MARGIN = 1
+
+#: 服务端窗口：超过这个时长未再失败，计数自动重置（实测推断）。
+LOGIN_WINDOW_SECONDS = 900
+
+#: 两次登录提交的最小间隔（ARCHITECTURE.md §5.2 规则 3）。
+#: 目的是避免「连着撞」触发风控——额度按 IP 计，撞狠了可能连正常
+#: 访问一起被限。
+MIN_SECONDS_BETWEEN_LOGIN = 600
+
+
+def can_attempt_login(session: ForumSession | None) -> tuple[bool, str]:
+    """是否可以再提交一次登录。返回 ``(允许, 原因)``。
+
+    ★ 这是**额度保护的唯一入口**。ARCHITECTURE.md §5.2 定下的规则：
+
+    - 规则 2：剩余次数 ≤ ``SAFETY_MARGIN`` 时拒绝（留 1 次救命）
+    - 规则 3：距上次提交不足 ``MIN_SECONDS_BETWEEN_LOGIN`` 时拒绝
+
+    之所以做成**纯函数**而不是埋在 :meth:`LoginClient.login` 里，
+    是为了让「为什么不让登录」可测、可读——额度是稀缺资源，
+    拒绝的理由必须能讲清楚。
+    """
+    if session is None:
+        return True, ""
+
+    left = session.login_attempts_left
+    if left is not None:
+        # ★ 窗口重置：服务端 900 秒未再失败就把计数清零。
+        #   不重置的话「上次失败过」会永久堵住登录，而实际上额度早回来了。
+        last = session.last_login_attempt
+        if last:
+            try:
+                elapsed = (
+                    datetime.now().astimezone() - datetime.fromisoformat(last)
+                ).total_seconds()
+                if elapsed > LOGIN_WINDOW_SECONDS:
+                    left = None          # 视为已重置
+            except ValueError:
+                pass
+        if left is not None and left <= SAFETY_MARGIN:
+            return False, (
+                f"登录额度仅剩 {left} 次（安全下限 {SAFETY_MARGIN}），"
+                f"拒绝提交以免耗尽；请等 {LOGIN_WINDOW_SECONDS // 60} 分钟窗口重置"
+            )
+
+    last = session.last_login_attempt
+    if last:
+        try:
+            elapsed = (
+                datetime.now().astimezone() - datetime.fromisoformat(last)
+            ).total_seconds()
+        except ValueError:
+            return True, ""
+        if elapsed < MIN_SECONDS_BETWEEN_LOGIN:
+            wait = int(MIN_SECONDS_BETWEEN_LOGIN - elapsed)
+            return False, (
+                f"距上次登录提交仅 {int(elapsed)} 秒，"
+                f"为避免风控需再等 {wait} 秒"
+            )
+
+    return True, ""
+
 
 #: 重登录状态。
 RELOGIN_OK = "ok"

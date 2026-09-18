@@ -324,3 +324,172 @@ def test_session_record_attempt_keeps_previous_when_none(store):
     store.record_attempt(attempts_left=None)
     loaded = store.load()
     assert loaded is not None and loaded.login_attempts_left == 4
+
+
+# ------------------------------------------------------------ 响应文案清洗
+#
+# ★ 这些是**真实抓到的响应形状**（不是编的）。实测提交一次失败登录，
+#   Discuz 返回的就是「文案 + 回调脚本」塞在同一个 CDATA 里。
+
+
+REAL_FAIL_BODY = (
+    '<?xml version="1.0" encoding="utf-8"?>'
+    '<root><![CDATA[登录失败，您还可以尝试 4 次'
+    '<script type="text/javascript" reload="1">'
+    "if(typeof errorhandle_=='function') {"
+    "errorhandle_('登录失败，您还可以尝试 4 次', {'loginperm':'4'});}"
+    "</script>]]></root>"
+)
+
+
+def test_failed_login_message_has_no_script():
+    """★ 回归：提示文案不能带 ``<script>``。
+
+    实测用户看到的是「登录失败，您还可以尝试 4 次<script …>errorhandle(…)」
+    这一整坨——CLI 打印、前端 toast 都会糊出来。
+    """
+    from bt169.source.login import LoginClient
+
+    result = LoginClient._interpret(REAL_FAIL_BODY)
+    assert result.ok is False
+    assert "<script" not in result.message
+    assert "errorhandle" not in result.message
+    assert result.message == "登录失败，您还可以尝试 4 次"
+
+
+def test_failed_login_still_parses_quota_from_dirty_body():
+    """清洗后仍必须能解析出剩余额度（这是额度保护的关键输入）。"""
+    from bt169.source.login import LoginClient
+
+    result = LoginClient._interpret(REAL_FAIL_BODY)
+    assert result.attempts_left == 4
+    assert result.quota_exhausted is False
+
+
+def test_clean_message_keeps_plain_text():
+    from bt169.source.login import clean_message
+
+    assert clean_message("  欢迎您回来  ") == "欢迎您回来"
+    assert clean_message("a<b>c</b>") == "ac"
+    assert clean_message("<script>x</script>好") == "好"
+
+
+def test_quota_exhausted_message_cleaned():
+    """额度耗尽的响应同样会带脚本——不能只清洗「还能尝试」那一支。"""
+    from bt169.source.login import LoginClient
+
+    body = (
+        '<root><![CDATA[登录失败次数过多，请 15 分钟后再试'
+        '<script type="text/javascript" reload="1">'
+        "errorhandle_('登录失败次数过多', {'loginperm':'0'});</script>]]></root>"
+    )
+    result = LoginClient._interpret(body)
+    assert result.quota_exhausted is True
+    assert "<script" not in result.message
+    assert result.message == "登录失败次数过多，请 15 分钟后再试"
+
+
+# ------------------------------------------------------------ 额度保护
+#
+# ★ 这一组防的是**真实事故**：实测对着线上论坛提交了一次失败登录，
+#   额度从 5 掉到 4。ARCHITECTURE.md §5.2 早就定了规则 2/3，
+#   但代码里从来没检查过——文档写了不等于实现了。
+
+
+def _session(**over):
+    from bt169.source.session import ForumSession
+
+    base = dict(
+        cookies={}, username="u", obtained_at="2026-09-01T00:00:00+08:00",
+        expires_at="2026-10-01T00:00:00+08:00", valid=True,
+        login_attempts_left=None, last_login_attempt=None,
+        last_relogin_at=None, relogin_state=None,
+    )
+    return ForumSession(**{**base, **over})
+
+
+def _ago(seconds: float) -> str:
+    from datetime import datetime, timedelta
+
+    return (datetime.now().astimezone() - timedelta(seconds=seconds)).isoformat(
+        timespec="seconds"
+    )
+
+
+def test_allows_login_when_no_session():
+    from bt169.source.session import can_attempt_login
+
+    assert can_attempt_login(None) == (True, "")
+
+
+def test_blocks_when_quota_at_safety_margin():
+    """★ 规则 2：只剩安全下限时拒绝（留 1 次救命）。"""
+    from bt169.source.session import can_attempt_login
+
+    allowed, reason = can_attempt_login(
+        _session(login_attempts_left=1, last_login_attempt=_ago(700))
+    )
+    assert allowed is False
+    assert "额度" in reason
+
+
+def test_blocks_when_quota_exhausted():
+    from bt169.source.session import can_attempt_login
+
+    allowed, _ = can_attempt_login(
+        _session(login_attempts_left=0, last_login_attempt=_ago(700))
+    )
+    assert allowed is False
+
+
+def test_allows_when_quota_healthy():
+    from bt169.source.session import can_attempt_login
+
+    allowed, _ = can_attempt_login(
+        _session(login_attempts_left=4, last_login_attempt=_ago(700))
+    )
+    assert allowed is True
+
+
+def test_quota_resets_after_window():
+    """★ 服务端 900 秒后计数自动重置——本地必须跟上。
+
+    否则「上次失败过」会永久堵住登录，而实际额度早就回来了。
+    """
+    from bt169.source.session import can_attempt_login
+
+    allowed, _ = can_attempt_login(
+        _session(login_attempts_left=0, last_login_attempt=_ago(1000))
+    )
+    assert allowed is True, "超过 900 秒窗口后额度应视为已重置"
+
+
+def test_blocks_rapid_resubmit():
+    """★ 规则 3：距上次提交太近时拒绝（避免风控）。"""
+    from bt169.source.session import can_attempt_login
+
+    allowed, reason = can_attempt_login(
+        _session(login_attempts_left=5, last_login_attempt=_ago(30))
+    )
+    assert allowed is False
+    assert "风控" in reason or "再等" in reason
+
+
+def test_login_refuses_when_quota_low(store):
+    """★ 端到端：额度不足时**一次 HTTP 请求都不发**。
+
+    这条最要紧——「拒绝」必须发生在提交之前，否则守卫毫无意义。
+    """
+    from bt169.source.login import LoginClient
+    from bt169.source.session import RELOGIN_BLOCKED
+
+    store.record_attempt(attempts_left=1, state="failed")
+    fc = FakeForum(login_body="<root><![CDATA[欢迎您回来]]></root>")
+    lc = LoginClient(client=fc, store=store, solvers=[])
+
+    result = lc.login("u", "p")
+
+    assert result.ok is False
+    assert "额度" in result.message
+    assert fc.posts == [], "额度不足时绝不该提交登录"
+    assert store.load().relogin_state == RELOGIN_BLOCKED
