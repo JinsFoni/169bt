@@ -1061,6 +1061,32 @@ select.input {
   color: var(--danger);
 }
 
+/* 续期进行中：静默提示（呼吸小圆点），不是错误 */
+.session-chip.is-busy {
+  border-color: rgba(194,201,214,.30);
+  background: rgba(194,201,214,.08);
+  color: var(--text-mid);
+}
+
+.session-dot {
+  width: 6px;
+  height: 6px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: session-breathe 1.6s ease-in-out infinite;
+}
+
+@keyframes session-breathe {
+  0%, 100% { opacity: .35; }
+  50%      { opacity: 1; }
+}
+
+/* ★ 尊重「减少动态效果」偏好：前庭功能敏感用户会因呼吸动画不适 */
+@media (prefers-reduced-motion: reduce) {
+  .session-dot { animation: none; opacity: .8; }
+}
+
 /* 窄屏顶栏空间紧：只压缩尺寸，**不隐藏**——
    ★ 手机上恰恰最需要看到「会话已失效」，隐藏提醒等于把问题藏起来。 */
 @media (max-width: 640px) {

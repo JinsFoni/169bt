@@ -197,6 +197,16 @@
     }
 
     var state = sess.relogin_state || 'ok';
+    if (state === 'retrying') {
+      // 续期进行中：静默提示（小圆点 + 呼吸动画），不是错误。
+      // ★ 仍然要占位：续期要跑几秒（取表单 + 解验证码 + 提交），
+      //   用户在这期间点「采集」会拿到旧会话——让他知道后端在忙。
+      chip.hidden = false;
+      chip.className = 'session-chip is-busy';
+      chip.innerHTML = '<span class="session-dot" aria-hidden="true"></span>续期中';
+      chip.title = '后端正在自动续期会话';
+      return;
+    }
     if (state === 'failed') {
       chip.hidden = false;
       chip.className = 'session-chip is-warn';

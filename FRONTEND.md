@@ -941,10 +941,14 @@ SELECT COUNT(*) FROM posts WHERE cover_img LIKE '%'||?||'%' OR detail_img LIKE '
 {
   "session": {
     "valid": true,
+    "username": "ymxh",
     "expires_at": "2026-10-18T12:00:00+08:00",
     "days_left": 23,
+    "needs_renewal": false,
+    "renew_window_days": 5,
     "last_relogin_at": "2026-09-25T03:00:00+08:00",
-    "relogin_state": "ok"
+    "relogin_state": "ok",
+    "login_attempts_left": 4
   },
   "collector": {
     "last_run_at": "2026-09-18T19:55:00+08:00",
@@ -955,7 +959,21 @@ SELECT COUNT(*) FROM posts WHERE cover_img LIKE '%'||?||'%' OR detail_img LIKE '
 }
 ```
 
+★ **绝不返回 Cookie 内容**——只返回派生信息（是否有效、剩余天数）。
+续期路径手里有完整 Cookie，最容易的事故就是图省事把会话对象整个序列化出去；
+`/api/status` 与 `/api/status/renew` 的响应形状都有测试钉住。
+
 `relogin_state` 取值：`ok` | `retrying` | `failed` | `blocked`（额度不足）
+
+### 14.1.1 手动触发续期
+
+`POST /api/status/renew` → `{attempted, ok, reason, message}`
+
+★ **未到续期窗口时返回 `attempted: false`**，不是错误。续期要消耗登录额度
+（5 次 / 900 秒，按 IP），不能因为用户点了按钮就无脑登一次。
+
+`reason` 取值：`not_needed` | `no_session` | `no_credentials` |
+`quota` | `too_soon` | `renewed` | `login_failed` | `error`
 
 ### 14.2 前端展示规则
 
