@@ -1041,6 +1041,10 @@ APScheduler (15min) 或 POST /api/emby/refresh
 | GET | `/api/archive/export` | `?date=` | `text/plain`，一行一个 ed2k | W-1 |
 | DELETE | `/api/posts/{tid}` | — | `204`（★ 硬删除：行 + 图片） | W-9 W-11 |
 | POST | `/api/posts/{tid}/delete` | — | `204`（同上，供 `sendBeacon` 使用） | W-9 |
+| POST | `/api/collect` | `{from_date, to_date}` | `202 {job}`；`409` 已有任务；`400` 范围非法 | C-10 |
+| GET | `/api/collect/status` | — | `{job \| null, recent[]}`（前端轮询） | C-10 |
+| GET | `/api/collect/jobs/{id}` | — | `{job}`；`404` | C-10 |
+| POST | `/api/collect/jobs/{id}/cancel` | — | `200 {job}`；`409` 未在跑 | C-10 M-7 |
 | GET | `/api/status` | — | 会话/采集器状态（`FRONTEND.md` §14.1） | F-C8 |
 | GET | `/img/{hash}-{w}.webp` | — | 本地化缩略图（`immutable`） | F-C10 |
 | POST | `/api/posts/{tid}/retry` | — | `202`（重排采集） | C-8 |
@@ -1172,9 +1176,9 @@ log.error("emby.sync.failed", exc_info=True)     # 但不影响浏览
 | 阶段 | 内容 | 验收 |
 |---|---|---|
 | **P0** | `config` + `db` + 迁移 + `169bt migrate` | ✅ **已完成**（126 测试通过；见 `docs/superpowers/plans/2026-09-18-backend-foundation.md`） |
-| **P1** | `source` 只读部分：`discover` + `fetch`（复用已存 Cookie）+ `parse` | 能抓到 1 帖完整字段，fixtures 测试绿 |
-| **P2** | `captcha` + `login` + 额度保护 | `169bt login` 能自动重登并刷新 Cookie（**先确认额度已重置**） |
-| **P3** | `collector` + 状态机 + 限速退避 | `169bt collect` 跑通一轮，不触发风控 |
+| **P1** | `source` 只读部分：`discover` + `fetch`（复用已存 Cookie）+ `parse` | ✅ **已完成**（`source/parse.py` + `source/forum.py` + `source/session.py`） |
+| **P2** | `captcha` + `login` + 额度保护 | ✅ **代码完成**（`source/captcha.py` + `source/login.py`，63 测试）；⚠️ 真实凭据下的登录 POST **尚未实测** |
+| **P3** | `collector` + 状态机 + 限速退避 | 🔶 **部分完成**：按日期范围采集（C-10）已跑通（真实站 13 帖 / 59 s）；定时轮询（C-1）、感谢解锁（C-4）、`imagecache` 待做 |
 | **P4** | `api` 只读接口 + 静态分发 | 前端从 API 取数渲染，Playwright 54 项回归绿 |
 | **P5** | 写接口：删除/撤销、`auth`、`settings` + 加密 | 设置真落盘、密钥加密、脱敏正确 |
 | **P6** | `telegram` + 转发接口 | 卡片「下载」真的发到 TG；`per_post` 批量可用 |

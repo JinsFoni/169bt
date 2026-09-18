@@ -33,6 +33,11 @@
 
     <div class="spacer"></div>
 
+    <button class="btn btn-icon btn-collect" id="collectBtn" type="button" title="手动采集" aria-label="手动采集">
+      <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4.5v11M4.5 10h11"/><circle cx="10" cy="10" r="7"/></svg>
+      <span class="btn-collect-bar" id="collectBar" hidden></span>
+    </button>
+
     <button class="btn btn-icon btn-settings" id="settingsBtn" type="button" title="设置" aria-label="打开设置">
       <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="2.7"/><path d="M15.9 12.2a1.5 1.5 0 0 0 .3 1.65l.05.05a1.8 1.8 0 1 1-2.55 2.55l-.05-.05a1.5 1.5 0 0 0-1.65-.3 1.5 1.5 0 0 0-.9 1.35v.15a1.8 1.8 0 1 1-3.6 0v-.08a1.5 1.5 0 0 0-.98-1.35 1.5 1.5 0 0 0-1.65.3l-.05.05a1.8 1.8 0 1 1-2.55-2.55l.05-.05a1.5 1.5 0 0 0 .3-1.65 1.5 1.5 0 0 0-1.35-.9H1.2a1.8 1.8 0 1 1 0-3.6h.08a1.5 1.5 0 0 0 1.35-.98 1.5 1.5 0 0 0-.3-1.65l-.05-.05A1.8 1.8 0 1 1 4.83 2.3l.05.05a1.5 1.5 0 0 0 1.65.3h.07a1.5 1.5 0 0 0 .9-1.35V1.2a1.8 1.8 0 1 1 3.6 0v.08a1.5 1.5 0 0 0 .9 1.35 1.5 1.5 0 0 0 1.65-.3l.05-.05a1.8 1.8 0 1 1 2.55 2.55l-.05.05a1.5 1.5 0 0 0-.3 1.65v.07a1.5 1.5 0 0 0 1.35.9h.15a1.8 1.8 0 1 1 0 3.6h-.08a1.5 1.5 0 0 0-1.35.9Z"/></svg>
     </button>
@@ -79,7 +84,11 @@
     <div class="settings-body">
 
       <nav class="settings-nav" role="tablist" aria-orientation="vertical" aria-label="设置分区">
-        <button class="dnav" id="tab-basic" role="tab" aria-selected="true" aria-controls="pane-basic" data-pane="basic" type="button">
+        <button class="dnav" id="tab-site" role="tab" aria-selected="true" aria-controls="pane-site" data-pane="site" type="button">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7"/><path d="M3 10h14M10 3c1.9 2.2 2.9 4.5 2.9 7S11.9 14.8 10 17c-1.9-2.2-2.9-4.5-2.9-7S8.1 5.2 10 3Z"/></svg>
+          <span>站点</span>
+        </button>
+        <button class="dnav" id="tab-basic" role="tab" aria-selected="false" aria-controls="pane-basic" data-pane="basic" type="button" tabindex="-1">
           <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 6.5h9M15.5 6.5H17M3 13.5h3M9.5 13.5H17"/><circle cx="13.5" cy="6.5" r="1.7"/><circle cx="7.5" cy="13.5" r="1.7"/></svg>
           <span>基础设置</span>
         </button>
@@ -99,7 +108,45 @@
 
       <div class="settings-panes">
 
-        <section class="pane" id="pane-basic" role="tabpanel" aria-labelledby="tab-basic" data-pane="basic">
+        <section class="pane" id="pane-site" role="tabpanel" aria-labelledby="tab-site" data-pane="site">
+          <div class="pane-scroll">
+            <div class="pane-head">
+              <h3 class="pane-title">站点</h3>
+              <p class="pane-desc">采集目标站点的订阅链接与登录凭据。</p>
+            </div>
+
+            <div class="field">
+              <label class="field-label" for="siteRss">RSS 订阅链接</label>
+              <input class="input is-mono" id="siteRss" type="text" placeholder="https://169bt.com/rss.php?fid=192" autocomplete="off" spellcheck="false">
+              <p class="field-hint">仅作参考记录；实际采集走列表页与详情页。</p>
+            </div>
+
+            <div class="field-row">
+              <div class="field field-grow">
+                <label class="field-label" for="siteUser">用户名</label>
+                <input class="input" id="siteUser" type="text" placeholder="—" autocomplete="off" spellcheck="false">
+              </div>
+              <div class="field field-grow">
+                <label class="field-label" for="sitePass">密码</label>
+                <div class="input-wrap">
+                  <input class="input" id="sitePass" type="password" placeholder="—" autocomplete="new-password">
+                  <button class="reveal" type="button" aria-label="显示密码" aria-pressed="false" data-reveal="sitePass">
+                    <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2 10s3-5.4 8-5.4S18 10 18 10s-3 5.4-8 5.4S2 10 2 10Z"/><circle cx="10" cy="10" r="2.2"/></svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <p class="field-hint">登录后可解锁需要感谢的帖子的 ED2K 链接；Cookie 有效期 30 天，后端会自动续期。</p>
+          </div>
+
+          <footer class="pane-foot">
+            <span class="save-state" data-state="site"></span>
+            <button class="btn btn-primary" type="button" data-save="site">保存</button>
+          </footer>
+        </section>
+
+        <section class="pane" id="pane-basic" role="tabpanel" aria-labelledby="tab-basic" data-pane="basic" hidden>
           <div class="pane-scroll">
             <div class="pane-head">
               <h3 class="pane-title">基础设置</h3>
@@ -260,6 +307,77 @@
   </aside>
 </div>
 
+<div class="collect" id="collectModal" hidden>
+  <div class="collect-scrim" data-close></div>
+
+  <div class="collect-panel" role="dialog" aria-modal="true" aria-labelledby="collectTitle">
+
+    <header class="collect-head">
+      <h2 class="collect-title" id="collectTitle">手动采集</h2>
+      <button class="settings-close" id="collectClose" type="button" aria-label="关闭">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5l10 10M15 5 5 15"/></svg>
+      </button>
+    </header>
+
+    <!-- 表单态 -->
+    <div class="collect-body" id="collectForm">
+      <p class="collect-desc">
+        采集指定日期范围内发布的全部帖子。数据库里已有的会跳过，不会重复采集。
+      </p>
+
+      <div class="collect-dates">
+        <label class="field">
+          <span class="field-label">起始日期</span>
+          <input class="input" type="date" id="collectFrom" required>
+        </label>
+        <label class="field">
+          <span class="field-label">结束日期</span>
+          <input class="input" type="date" id="collectTo" required>
+        </label>
+      </div>
+
+      <div class="collect-quick" role="group" aria-label="快捷范围">
+        <button class="chip" type="button" data-quick="1">今天</button>
+        <button class="chip" type="button" data-quick="3">近 3 天</button>
+        <button class="chip" type="button" data-quick="7">近 7 天</button>
+        <button class="chip" type="button" data-quick="30">近 30 天</button>
+      </div>
+
+      <p class="collect-note" id="collectNote">
+        采集为串行限速（每帖间隔 2–5 秒），数百帖可能耗时较久。
+      </p>
+    </div>
+
+    <!-- 进度态 -->
+    <div class="collect-body" id="collectProgress" hidden>
+      <div class="collect-status">
+        <span class="collect-status-text" id="collectStatusText">正在准备…</span>
+        <span class="mono collect-percent" id="collectPercent">0%</span>
+      </div>
+
+      <div class="collect-track" role="progressbar" id="collectTrack"
+           aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <div class="collect-fill" id="collectFill"></div>
+      </div>
+
+      <dl class="collect-stats">
+        <div><dt>发现</dt><dd id="collectTotal">0</dd></div>
+        <div><dt>新增</dt><dd id="collectCollected">0</dd></div>
+        <div><dt>跳过</dt><dd id="collectSkipped">0</dd></div>
+        <div><dt>失败</dt><dd id="collectFailed">0</dd></div>
+      </dl>
+
+      <p class="collect-note" id="collectProgressNote">—</p>
+    </div>
+
+    <footer class="collect-foot">
+      <button class="btn btn-ghost" id="collectCancel" type="button" hidden>取消采集</button>
+      <button class="btn btn-primary" id="collectStart" type="button">开始采集</button>
+    </footer>
+
+  </div>
+</div>
+
 <div class="lightbox" id="lightbox" hidden>
   <div class="lightbox-scrim" data-close></div>
   <div class="lightbox-panel" role="dialog" aria-modal="true" aria-label="影片预览">
@@ -276,8 +394,9 @@
 
 <div class="toast-stack" id="toastStack" aria-live="polite"></div>
 
-<script src="data.js"></script>
+<script src="api.js"></script>
 <script src="app.js"></script>
 <script src="settings.js"></script>
+<script src="collect.js"></script>
 </body>
 </html>

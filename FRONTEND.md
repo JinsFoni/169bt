@@ -128,10 +128,16 @@ ui/
 
 | 现状 | 目标 |
 |---|---|
-| `ui/app.js`（445 行 IIFE） | 拆入 `store.js` + `views/*` |
-| `ui/settings.js`（153 行 IIFE） | `views/settings.js` |
-| `ui/data.js`（55 帖硬编码） | **删除**，改由 `api.js` 取数 |
+| `ui/app.js`（IIFE） | 拆入 `store.js` + `views/*` |
+| `ui/settings.js`（IIFE） | `views/settings.js` |
+| `ui/collect.js`（IIFE，新增） | `views/collect.js` |
+| `ui/data.js`（55 帖硬编码） | ✅ **已删除**，改由 `api.js` 取数 |
 | `ui/styles.css`（948 行） | 拆为 `css/` 三文件 |
+
+> **迁移已完成的部分**：`api.js` 已建立并成为唯一 fetch 出口；
+> `data.js` 已删除；三个 IIFE（`app.js`/`settings.js`/`collect.js`）均已
+> 改为通过 `window.api` 访问后端。目录仍未拆分（仍是扁平 `ui/*.js`），
+> 且**仍未用 ESM**——完整迁移到上面的目录结构是 §12 F2–F5 的工作。
 
 ---
 
@@ -196,6 +202,19 @@ export const api = {
 
 **离线降级**：`fetch` 抛 `TypeError`（网络不可达）时，`api` 将其转为
 `ApiError{ code:'offline' }`，`store` 据此展示缓存数据 + 离线提示。
+
+**当前实现**（`ui/api.js`，IIFE 而非 ESM，因 `index.html` 仍是普通 `<script>`）：
+
+```js
+window.api = {
+  getHealth, getDates, getPosts, getStatus,
+  getSettings, saveSettings(section, values),
+  startCollect(fromDate, toDate), getCollectStatus, cancelCollect(jobId),
+  deletePost(tid),
+};
+```
+
+> `forward(tid)` **尚未实现**（TG 转发未做），故未列入。
 
 ### 3.2 `store.js` 契约
 
@@ -951,6 +970,63 @@ SELECT COUNT(*) FROM posts WHERE cover_img LIKE '%'||?||'%' OR detail_img LIKE '
 | 手动出口已有 | `169bt login` 子命令（自动失败时的人工兜底） |
 
 **前端不提供「重新登录」按钮**，只提供**状态可见性**。
+
+---
+
+## 14.5 手动采集（C-10）
+
+### 14.5.1 为什么在顶栏而不是设置里
+
+采集是**日常动作**（每天跑一次），设置是**一次性配置**。
+放顶栏才能一键到达，且与浏览上下文无关。
+
+### 14.5.2 位置与形态
+
+```
+顶栏：[复制当日] [下载本日]        [⚙ 采集] [⚙ 设置]   ← 采集在设置**之前**
+```
+
+- 图标：圆圈 + 加号（黄铜/青色系，与复制黄铜、下载绿色区分）
+- 形态：**居中悬浮卡片**（440 px 宽），与设置面板同风格
+- 采集进行中：按钮呼吸动画 + 底部 2 px 进度条
+
+### 14.5.3 交互流程
+
+```
+点采集按钮
+   │
+   ├─▶ 弹窗（表单态）
+   │     起始日期 [date]   结束日期 [date]     ← 默认「近 2 天」
+   │     [今天] [近3天] [近7天] [近30天]        ← 快捷范围
+   │     [开始采集]
+   │
+   ├─▶ POST /api/collect {from_date, to_date}
+   │     202 → 切进度态；409 → 「已有任务在运行」
+   │
+   ├─▶ 进度态（每 1.2 s 轮询 GET /api/collect/status）
+   │     阶段文字 / 百分比 / 进度条
+   │     发现 · 新增 · 跳过 · 失败
+   │     [取消采集]
+   │
+   └─▶ 终态：Toast「采集完成：新增 N 个，跳过 M 个」
+          └─▶ 触发 reloadDates() 刷新主界面日期列表
+```
+
+### 14.5.4 关键设计决定
+
+| 决定 | 理由 |
+|---|---|
+| 关闭弹窗**不中断**采集 | 采集跑在后端线程；关页面也不影响 |
+| 重开页面**自动接回**进度 | 启动时查一次 `/api/collect/status`，有任务就直接进进度态 |
+| 采集中**隐藏关闭按钮** | 防误关；要退出就点「取消采集」（语义明确） |
+| 轮询失败**不中断** | 网络抖动时继续轮询，仅改状态文字 |
+| 起止倒置**前端先拦** | 少一次无意义的往返；后端仍会再校一次 |
+
+### 14.5.5 与浏览列表的关系
+
+采集完成**不直接插数据到内存**，而是调 `reloadDates()` 重新拉
+`/api/dates` 和当前日的 `/api/posts`——**单一数据源**，
+避免内存与库不一致（例如「库里已有的跳过」在内存里无法判断）。
 
 ---
 

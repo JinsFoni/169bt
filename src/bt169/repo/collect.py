@@ -9,7 +9,8 @@ from bt169.db import Database
 from bt169.repo.posts import now_iso
 
 __all__ = ["CollectJob", "CollectRepo", "JOB_RUNNING", "JOB_DONE",
-           "JOB_FAILED", "JOB_CANCELLED", "TERMINAL_JOB_STATUSES"]
+           "JOB_FAILED", "JOB_CANCELLED", "TERMINAL_JOB_STATUSES",
+           "last_run_stats"]
 
 JOB_RUNNING = "running"
 JOB_DONE = "done"
@@ -203,3 +204,30 @@ def _from_row(row: sqlite3.Row) -> CollectJob:
         started_at=row["started_at"],
         finished_at=row["finished_at"],
     )
+
+
+def last_run_stats(repo: "CollectRepo") -> tuple[str | None, str | None, int]:
+    """统计最近运行时间与连续失败数（供 ``/api/status`` 使用）。
+
+    Returns:
+        ``(last_run_at, last_ok_at, consecutive_failures)``
+    """
+    rows = repo._db.read().execute(
+        "SELECT status, started_at, finished_at FROM collect_jobs"
+        " ORDER BY id DESC LIMIT 20"
+    ).fetchall()
+    if not rows:
+        return None, None, 0
+
+    last_run_at = rows[0]["finished_at"] or rows[0]["started_at"]
+    last_ok_at = next(
+        (r["finished_at"] or r["started_at"] for r in rows if r["status"] == JOB_DONE),
+        None,
+    )
+    failures = 0
+    for r in rows:
+        if r["status"] in (JOB_FAILED, JOB_CANCELLED):
+            failures += 1
+        else:
+            break
+    return last_run_at, last_ok_at, failures

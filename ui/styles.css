@@ -776,6 +776,8 @@ body::before {
 }
 
 .save-state { margin-right: auto; font-size: 12.5px; color: var(--cyan); }
+.save-state.is-ok  { color: var(--cyan); }
+.save-state.is-err { color: var(--danger); }
 
 /* ============================ 表单控件 ============================ */
 
@@ -884,6 +886,234 @@ select.input {
 }
 .btn-icon.btn-settings:hover { color: var(--text); background: rgba(255,255,255,.1); border-color: rgba(255,255,255,.24); }
 
+/* ---------- 手动采集按钮（位于设置齿轮之前） ---------- */
+
+.btn-icon.btn-collect {
+  position: relative;
+  color: var(--cyan);
+  background: rgba(94,200,200,.08);
+  border-color: rgba(94,200,200,.3);
+  overflow: hidden;
+}
+.btn-icon.btn-collect:hover {
+  color: #7FDCDC;
+  background: rgba(94,200,200,.17);
+  border-color: rgba(94,200,200,.55);
+}
+
+/* 采集进行中：按钮呼吸，提示后台仍在跑 */
+.btn-icon.btn-collect.is-running {
+  animation: collectPulse 2s var(--ease) infinite;
+}
+@keyframes collectPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(94,200,200,0); }
+  50%      { box-shadow: 0 0 0 4px rgba(94,200,200,.18); }
+}
+
+/* 按钮底部的进度条（不占额外空间） */
+.btn-collect-bar {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 2px;
+  width: 0;
+  background: var(--cyan);
+  transition: width .4s var(--ease);
+}
+
+/* ---------- 手动采集弹窗 ---------- */
+
+.collect {
+  position: fixed;
+  inset: 0;
+  z-index: 110;                 /* 高于设置，低于 toast */
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.collect-scrim {
+  position: absolute;
+  inset: 0;
+  background: rgba(4,6,10,.7);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  animation: fadeIn .2s var(--ease);
+}
+
+.collect-panel {
+  position: relative;
+  z-index: 1;
+  width: min(440px, 100%);
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--r-card);
+  background: var(--ink-800);
+  border: 1px solid var(--line-strong);
+  box-shadow: var(--sh-float);
+  overflow: hidden;
+  animation: modalIn .26s var(--ease);
+}
+
+.collect-head {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 15px 14px 15px 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.collect-title {
+  margin: 0;
+  font-family: "Bricolage Grotesque", sans-serif;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -.015em;
+}
+
+.collect-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 20px 22px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.collect-desc {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--text-mid);
+}
+
+.collect-dates {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.collect-quick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.chip {
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: rgba(255,255,255,.035);
+  color: var(--text-mid);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: background .16s var(--ease), color .16s var(--ease), border-color .16s var(--ease);
+}
+.chip:hover {
+  background: rgba(217,164,65,.12);
+  border-color: rgba(217,164,65,.4);
+  color: var(--brass-soft);
+}
+
+.collect-note {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+
+/* 日期输入：日历图标在深色底上默认不可见，须反色 */
+.input[type="date"] { color-scheme: dark; }
+
+/* ---------- 采集进度 ---------- */
+
+.collect-status {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.collect-status-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 13.5px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.collect-percent {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--cyan);
+  font-variant-numeric: tabular-nums;
+}
+
+.collect-track {
+  height: 6px;
+  border-radius: var(--r-pill);
+  background: var(--ink-900);
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+
+.collect-fill {
+  height: 100%;
+  width: 0;
+  border-radius: var(--r-pill);
+  background: linear-gradient(90deg, var(--brass-deep), var(--cyan));
+  transition: width .4s var(--ease);
+}
+
+.collect-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  margin: 0;
+}
+.collect-stats > div {
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-btn);
+  background: rgba(255,255,255,.03);
+}
+.collect-stats dt {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.collect-stats dd {
+  margin: 3px 0 0;
+  font-family: "Bricolage Grotesque", sans-serif;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.collect-stats dd.is-ok    { color: var(--cyan); }
+.collect-stats dd.is-muted { color: var(--text-dim); }
+.collect-stats dd.is-err   { color: var(--danger); }
+
+.collect-foot {
+  flex-shrink: 0;
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
+  padding: 14px 20px;
+  border-top: 1px solid var(--line);
+  background: rgba(0,0,0,.2);
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text-mid);
+}
+.btn-ghost:hover { color: var(--text); background: rgba(255,255,255,.07); }
+
 /* ============================ 响应式 ============================ */
 
 @media (max-width: 900px) {
@@ -897,6 +1127,7 @@ select.input {
 
   /* 顶栏换行后，齿轮仍紧贴日期切换左侧 */
   .btn-settings { order: 2; margin-left: auto; }
+  .btn-collect  { order: 2; }
   .date-nav { order: 2; margin-left: 0; }
 
   .settings { padding: 18px; }

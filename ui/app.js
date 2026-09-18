@@ -7,10 +7,13 @@
 
   /* ---------- 状态 ---------- */
 
-  var posts = (window.DEMO_POSTS || []).slice();
-  var deleted = [];          // 删除栈，支持撤销
-  var activeDate = null;     // 当前归档日期
+  var posts = [];            // 当前归档日的帖子（按需从后端取）
   var dateList = [];         // 有帖的日期（升序：左旧右新）
+  var counts = {};           // date → 帖子数
+  var activeDate = null;     // 当前归档日期
+  var deleted = [];          // 删除栈，支持撤销
+  var pendingDelete = null;  // {tid, timer, entry} 等待 5 s 撤销窗口
+  var loading = false;
 
   /* ---------- DOM ---------- */
 
@@ -128,25 +131,24 @@
 
   /* ---------- 归档日期 ---------- */
 
-  function rebuildDates() {
-    var seen = {};
-    posts.forEach(function (p) { seen[p.post_date] = true; });
-    dateList = Object.keys(seen).sort();      // 升序：左旧右新，与日期轨一致
+  /* 日期列表来自后端（`/api/dates` → [{date, count}]，后端按降序返回） */
+  function loadDates() {
+    return window.api.getDates().then(function (rows) {
+      rows = rows || [];
+      dateList = rows.map(function (r) { return r.date; }).sort();
+      counts = {};
+      rows.forEach(function (r) { counts[r.date] = r.count; });
+      return dateList;
+    });
   }
 
-  function countOf(date) {
-    return posts.filter(function (p) { return p.post_date === date; }).length;
-  }
-
-  function postsOf(date) {
-    return posts.filter(function (p) { return p.post_date === date; });
-  }
+  function countOf(date) { return counts[date] || 0; }
 
   function navTo(date) {
     if (!date || date === activeDate) return;
     activeDate = date;
-    render();
     window.scrollTo({ top: 0, behavior: 'smooth' });
+    loadPosts(date);
   }
 
   function step(dir) {
@@ -154,6 +156,24 @@
     if (i < 0) return;
     var next = dateList[i + dir];          // -1 = 更早，+1 = 更晚
     if (next) navTo(next);
+  }
+
+  /* 取某日帖子并渲染。竞态保护：期间用户切了日期就丢弃这次结果 */
+  function loadPosts(date) {
+    loading = true;
+    render();
+    return window.api.getPosts(date).then(function (list) {
+      if (activeDate !== date) return;     // 已切走，丢弃
+      loading = false;
+      posts = list || [];
+      render();
+    }).catch(function (e) {
+      if (activeDate !== date) return;
+      loading = false;
+      posts = [];
+      render();
+      toast('加载失败：' + e.message, 'err', { duration: 4600 });
+    });
   }
 
   /* ---------- 渲染：卡片 ---------- */
@@ -220,7 +240,7 @@
   function render() {
     if (!activeDate && dateList.length) activeDate = dateList[dateList.length - 1];
 
-    var list = activeDate ? postsOf(activeDate) : [];
+    var list = posts;
     var total = activeDate ? countOf(activeDate) : 0;
 
     /* 顶栏 */
@@ -239,10 +259,20 @@
       : '当日没有可复制的 ED2K 链接';
 
     /* 卡片 */
-    if (!list.length) {
+    if (loading) {
       grid.innerHTML = '';
       grid.hidden = true;
       empty.hidden = false;
+      empty.querySelector('.empty-title').textContent = '正在加载…';
+      empty.querySelector('.empty-hint').textContent = '';
+    } else if (!list.length) {
+      grid.innerHTML = '';
+      grid.hidden = true;
+      empty.hidden = false;
+      empty.querySelector('.empty-title').textContent = '这一天没有帖子';
+      empty.querySelector('.empty-hint').textContent =
+        dateList.length ? '用上方的 ◀ ▶ 按钮切换到其他归档日。'
+                        : '点顶栏的采集按钮，把帖子抓回来。';
     } else {
       empty.hidden = true;
       grid.hidden = false;
@@ -260,7 +290,16 @@
     }
   }
 
-  /* ---------- 删除 / 撤销 ---------- */
+  /* ---------- 删除 / 撤销（FRONTEND.md §13 延迟删除窗口） ----------
+
+     ① 点删除 → 卡片动画 + 从内存移除，**此时不发请求**
+     ② Toast 5 s 撤销窗口
+     ③a 撤销 → 什么都没发生过
+     ③b 到期 → DELETE /api/posts/{tid}
+     ④  窗口内关页 → sendBeacon 兜底
+  */
+
+  var DELETE_WINDOW_MS = 5000;
 
   function removePost(tid, animate) {
     var idx = -1;
@@ -268,6 +307,7 @@
       if (posts[i].tid === tid) { idx = i; break; }
     }
     if (idx < 0) return;
+    if (pendingDelete && pendingDelete.tid === tid) return;   // 防重复点击
 
     var removed = posts[idx];
     var pos = idx;
@@ -275,22 +315,22 @@
     var card = grid.querySelector('.card[data-tid="' + tid + '"]');
     var finish = function () {
       posts.splice(pos, 1);
-      deleted.push({ post: removed, index: pos });
-      rebuildDates();
+      counts[activeDate] = Math.max(0, (counts[activeDate] || 1) - 1);
 
       // 当前日期已空 → 自动跳到最近的相邻日期
       if (countOf(activeDate) === 0) {
         var j = dateList.indexOf(activeDate);
-        if (j < 0) activeDate = dateList[dateList.length - 1] || null;
+        if (j >= 0) dateList.splice(j, 1);
+        var next = dateList[dateList.length - 1];
+        if (next && next !== activeDate) {
+          activeDate = next;
+          render();
+          loadPosts(next);
+          return;
+        }
       }
-      if (!posts.length) activeDate = null;
+      if (!dateList.length) activeDate = null;
       render();
-
-      toast('已删除 ' + removed.code, 'info', {
-        actionLabel: '撤销',
-        duration: 5000,
-        onAction: undoDelete
-      });
     };
 
     if (card && animate !== false) {
@@ -299,21 +339,56 @@
     } else {
       finish();
     }
+
+    // ★ 5 s 内不发任何请求
+    var timer = setTimeout(function () {
+      pendingDelete = null;
+      window.api.deletePost(tid).then(function () {
+        toast('已删除 ' + (removed.code || tid), 'ok', { duration: 2000 });
+      }).catch(function (e) {
+        toast('删除失败：' + e.message, 'err', { duration: 4600 });
+        // 安全失败方向：没删掉 → 把卡片放回来
+        posts.splice(Math.min(pos, posts.length), 0, removed);
+        counts[activeDate] = (counts[activeDate] || 0) + 1;
+        render();
+      });
+    }, DELETE_WINDOW_MS);
+
+    pendingDelete = { tid: tid, timer: timer, post: removed, index: pos };
+
+    toast('已删除 ' + (removed.code || tid), 'info', {
+      actionLabel: '撤销',
+      duration: DELETE_WINDOW_MS,
+      onAction: undoDelete
+    });
   }
 
   function undoDelete() {
-    var last = deleted.pop();
-    if (!last) return;
-    posts.splice(last.index, 0, last.post);
-    posts.sort(function (a, b) {
-      if (a.post_date !== b.post_date) return a.post_date < b.post_date ? 1 : -1;
-      return b.tid - a.tid;
-    });
-    activeDate = last.post.post_date;
-    rebuildDates();
+    if (!pendingDelete) return;
+    clearTimeout(pendingDelete.timer);
+    var entry = pendingDelete;
+    pendingDelete = null;
+
+    posts.splice(Math.min(entry.index, posts.length), 0, entry.post);
+    counts[activeDate] = (counts[activeDate] || 0) + 1;
+    if (dateList.indexOf(activeDate) < 0 && activeDate) {
+      dateList.push(activeDate);
+      dateList.sort();
+    }
     render();
-    toast('已恢复 ' + last.post.code, 'ok', { duration: 2200 });
+    toast('已恢复 ' + (entry.post.code || entry.post.tid), 'ok', { duration: 2200 });
   }
+
+  /* ③④ 页面关闭时把窗口内的删除发出去（FRONTEND.md §13.3） */
+  window.addEventListener('pagehide', function () {
+    if (!pendingDelete) return;
+    var tid = pendingDelete.tid;
+    if (navigator.sendBeacon) {
+      navigator.sendBeacon('/api/posts/' + tid + '/delete');
+    } else {
+      window.api.deletePost(tid).catch(function () {});
+    }
+  });
 
   /* ---------- 复制 ---------- */
 
@@ -344,7 +419,7 @@
   }
 
   function copyDayAll() {
-    var links = postsOf(activeDate)
+    var links = posts
       .map(function (p) { return p.ed2k; })
       .filter(Boolean);
 
@@ -431,15 +506,38 @@
 
   /* ---------- 启动 ---------- */
 
-  rebuildDates();
-  activeDate = dateList[dateList.length - 1] || null;   // 默认最新日期
-  render();
+  /* 从后端拉日期列表，默认停在最新一天 */
+  function boot() {
+    return loadDates().then(function () {
+      activeDate = dateList[dateList.length - 1] || null;
+      if (!activeDate) { render(); return; }
+      return loadPosts(activeDate);
+    }).catch(function (e) {
+      loading = false;
+      render();
+      toast('无法连接后端：' + e.message, 'err', { duration: 6000 });
+    });
+  }
+
+  /* 采集完成后由 collect.js 调用，刷新日期列表 */
+  window.reloadDates = function () {
+    return loadDates().then(function () {
+      if (!activeDate) activeDate = dateList[dateList.length - 1] || null;
+      if (activeDate) return loadPosts(activeDate);
+    }).catch(function () {});
+  };
+
+  /* app.js 的 toast 供 collect.js 复用（全局单例只有这一个 UI 出口） */
+  window.toast = toast;
+
+  boot();
 
   // 调试入口
   window.__archive = {
     get posts()   { return posts; },
     get deleted() { return deleted; },
     get dates()   { return dateList; },
-    get active()  { return activeDate; }
+    get active()  { return activeDate; },
+    reload: boot
   };
 })();

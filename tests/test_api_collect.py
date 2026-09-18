@@ -249,13 +249,18 @@ def test_collected_posts_browsable(fake_app):
 
 
 def test_status_endpoint_shape(client):
+    """★ 契约与 FRONTEND.md §14.1 对齐（避免前后端字段漂移）。"""
     r = client.get("/api/status")
     assert r.status_code == 200
     body = r.json()
-    assert set(body) == {"version", "session", "collect", "library"}
-    assert body["session"]["logged_in"] is False
+    assert set(body) == {
+        "version", "session", "collector", "collect", "library", "last_error"
+    }
+    assert body["session"]["valid"] is False
+    assert body["session"]["relogin_state"] == "ok"
     assert body["collect"]["running"] is False
     assert body["library"]["total"] == 0
+    assert body["collector"]["consecutive_failures"] == 0
 
 
 def test_status_never_leaks_cookies(db, box, client):
@@ -275,7 +280,7 @@ def test_status_reports_session_days_left(db, box, client):
 
     SessionStore(db).save_cookies({"a": "1"}, username="tester")
     body = client.get("/api/status").json()
-    assert body["session"]["logged_in"] is True
+    assert body["session"]["valid"] is True
     assert body["session"]["username"] == "tester"
     assert body["session"]["days_left"] >= 28
 
