@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -15,6 +16,8 @@ from bt169.crypto import SecretBox
 from bt169.db import Database
 
 __all__ = ["create_app"]
+
+log = logging.getLogger(__name__)
 
 
 def create_app(
@@ -119,9 +122,15 @@ def _make_lifespan(interval: float):
         scheduler = _build_emby_scheduler(app, interval)
         app.state.emby_scheduler = scheduler
         scheduler.start()
+
+        # W-16：会话续期。与 Emby 用同一个开关（测试传 0 则都不启）。
+        renewer = _build_renew_loop(app, RENEW_CHECK_SECONDS)
+        app.state.renew_scheduler = renewer
+        renewer.start()
         try:
             yield
         finally:
+            renewer.stop()
             scheduler.stop()
 
     return lifespan
@@ -146,6 +155,38 @@ def _build_emby_scheduler(app: FastAPI, interval: float):
         build_syncer=build,
         interval=SYNC_INTERVAL_SECONDS if interval < 0 else interval,
     )
+
+
+def _build_renew_loop(app: FastAPI, interval: float):
+    """会话续期定时器（W-16）。
+
+    ★ 默认间隔 **12 小时**，而不是「每天一次」：
+      ``maybe_renew`` 本身会判断是否进入续期窗口，多跑几次是幂等的；
+      而跑得太稀疏（比如每天一次）可能让会话在两次检查之间就过期了。
+
+    ★ 复用 ``EmbyScheduler``：它已经处理好了「不抛异常 + 算下次该跑的时刻
+      + stop_event 能打断等待」。这里只需要把 ``build_syncer`` 换成
+      「返回一个带 ``sync()`` 的适配器」——不重写一个定时器。
+    """
+    from bt169.emby import EmbyScheduler
+
+    class _Adapter:
+        def sync(self):
+            from bt169.api.routes.status import build_renewer
+
+            result = build_renewer(app).maybe_renew()
+            if result.attempted:
+                log.info("会话续期：ok=%s %s", result.ok, result.message)
+            return result
+
+    # ★ delay_first=True：服务器重启是常见操作，启动即续期会在反复重启中
+    #   把登录额度烧光（REQUIREMENTS.md §B.2.2）。首次检查推迟一个 interval。
+    return EmbyScheduler(build_syncer=lambda: _Adapter(), interval=interval,
+                         delay_first=True)
+
+
+#: 会话续期的检查间隔（秒）。12 小时。
+RENEW_CHECK_SECONDS = 12 * 3600
 
 
 def _install_emby_scheduler(app: FastAPI, interval: float) -> None:

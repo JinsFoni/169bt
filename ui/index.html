@@ -56,6 +56,10 @@
 
     <div class="spacer"></div>
 
+    <!-- 会话状态（FRONTEND.md §14.2）：只在异常或临近过期时显示，
+         正常时不占任何视觉空间。内容由 app.js 控制。 -->
+    <span class="session-chip" id="sessionChip" hidden></span>
+
     <button class="btn btn-icon btn-collect" id="collectBtn" type="button" title="手动采集" aria-label="手动采集">
       <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4.5v11M4.5 10h11"/><circle cx="10" cy="10" r="7"/></svg>
       <span class="btn-collect-bar" id="collectBar" hidden></span>

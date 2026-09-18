@@ -17,7 +17,7 @@ from bt169.config import section_key
 from bt169.repo.collect import CollectRepo, last_run_stats
 from bt169.repo.posts import PostRepo
 from bt169.repo.settings import SettingsRepo
-from bt169.source.session import RENEW_BEFORE_DAYS, SessionStore
+from bt169.source.session import RENEW_BEFORE_DAYS, SessionRenewer, SessionStore
 
 router = APIRouter(prefix="/api", tags=["status"])
 
@@ -97,3 +97,57 @@ def _tg_configured(settings: SettingsRepo) -> bool:
     token = (settings.get(section_key("tg", "token")) or "").strip()
     chat_id = (settings.get(section_key("tg", "chat_id")) or "").strip()
     return bool(token and chat_id)
+
+
+def build_renewer(request: Request) -> SessionRenewer:
+    """构造会话续期器（W-16）。
+
+    ★ 凭据用**闭包延迟读取**：每次续期时才从库里取，用户改了密码不必重启。
+    ★ 取凭据可能抛（主密钥坏了 / 解密失败）——``SessionRenewer`` 会吞掉
+      并当作「无凭据」，不续期也不报错。
+    """
+    from bt169.source.captcha import PythonSolver
+    from bt169.source.forum import ForumClient
+    from bt169.source.login import LoginClient
+
+    db = request.app.state.db
+    settings = SettingsRepo(db, request.app.state.box)
+    store = SessionStore(db)
+
+    def credentials() -> tuple[str, str]:
+        return (
+            settings.get(section_key("site", "username")) or "",
+            settings.get(section_key("site", "password")) or "",
+        )
+
+    class _ClientFactory:
+        """每次登录新建一个 ForumClient，用完即关。
+
+        ★ 不能常驻复用：登录是一次性动作，且旧连接会在 Cookie 失效后
+          一直复用死连接。
+        """
+
+        def login(self, username: str, password: str):  # type: ignore[no-untyped-def]
+            client = ForumClient()
+            try:
+                lc = LoginClient(client=client, store=store,
+                                 solvers=[PythonSolver()])
+                return lc.login(username, password)
+            finally:
+                client.close()
+
+    return SessionRenewer(store=store, login_client=_ClientFactory(),
+                          credentials=credentials)
+
+
+@router.post("/status/renew")
+def renew(
+    request: Request,
+    store: SessionStore = Depends(get_session_store),
+) -> dict[str, Any]:
+    """手动触发一次会话续期（W-16）。
+
+    ★ 未到续期窗口时**什么都不做**（``attempted: false``）——续期要消耗
+      登录额度，不能因为用户点了按钮就无脑登一次。
+    """
+    return build_renewer(request).maybe_renew().to_dict()

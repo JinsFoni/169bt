@@ -287,12 +287,17 @@ class EmbyScheduler:
     ★ 用「算下一次该跑的时刻」而不是 ``sleep(interval)``：
     同步本身可能耗时数十秒，固定 sleep 会让实际间隔变成
     ``interval + 同步耗时``，越漂越远。
+
+    ★ ``delay_first=True`` 时**第一次 tick 等一个 interval 再跑**。
+    会话续期必须用它：续期要消耗登录额度，而服务器重启是常见操作，
+    启动即续期意味着反复重启就把额度烧光了（REQUIREMENTS.md §B.2.2）。
     """
 
     build_syncer: Any            # Callable[[], EmbySyncer | None]
     interval: float = SYNC_INTERVAL_SECONDS
     stop_event: Any = None       # threading.Event；None → 自己建
     clock: Any = None            # time.monotonic；注入用于测试
+    delay_first: bool = False    # True → 首次 tick 推迟一个 interval
 
     def __post_init__(self) -> None:
         import threading
@@ -324,15 +329,27 @@ class EmbyScheduler:
 
     def run(self) -> None:
         """循环直到 ``stop_event`` 被设置。"""
+        first = True
         while not self.stop_event.is_set():
+            if first and self.delay_first:
+                # ★ 先睡满一个 interval 再首次 tick（见类文档）
+                first = False
+                if not self._wait_until(self.clock() + self.interval):
+                    return
+            first = False
             self.tick()
-            deadline = self.clock() + self.interval
-            while not self.stop_event.is_set():
-                remaining = deadline - self.clock()
-                if remaining <= 0:
-                    break
-                # 用 wait 而不是 sleep：停止信号能立刻打断等待
-                self.stop_event.wait(min(remaining, 5.0))
+            if not self._wait_until(self.clock() + self.interval):
+                return
+
+    def _wait_until(self, deadline: float) -> bool:
+        """等到 ``deadline``；被停止信号打断时返回 False。"""
+        while not self.stop_event.is_set():
+            remaining = deadline - self.clock()
+            if remaining <= 0:
+                return True
+            # 用 wait 而不是 sleep：停止信号能立刻打断等待
+            self.stop_event.wait(min(remaining, 5.0))
+        return False
 
     def start(self) -> None:
         import threading

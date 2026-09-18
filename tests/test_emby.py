@@ -511,3 +511,100 @@ def test_default_http_has_timeout():
         assert c.timeout.read == 7.5
     finally:
         c.close()
+
+
+def test_scheduler_delay_first_defers_initial_tick():
+    """★ ``delay_first=True``：首次 tick 必须**等一个 interval**。
+
+    这是会话续期的安全前提——续期消耗登录额度（5 次 / 900 秒，按 IP），
+    而重启服务是常见操作。若启动即续期，反复重启就把额度烧光了。
+    """
+    fake_now = [0.0]
+    calls = []
+
+    class StopAt:
+        """★ 按**虚拟时钟**停止，而不是按 is_set 调用次数。
+
+        ``_wait_until`` 内部是 ``min(remaining, 5.0)`` 轮询，is_set 会被
+        调用上百次；按次数计数的假事件会过早变 True（假失败）。
+        """
+
+        def __init__(self, limit):
+            self.limit = limit
+
+        def is_set(self):
+            return fake_now[0] >= self.limit
+
+        def set(self):
+            pass
+
+        def wait(self, t):
+            fake_now[0] += t
+
+    class S:
+        def sync(self):
+            calls.append(fake_now[0])
+            return SyncResult()
+
+    sch = EmbyScheduler(build_syncer=lambda: S(), interval=900,
+                        stop_event=StopAt(1800),
+                        clock=lambda: fake_now[0], delay_first=True)
+    sch.run()
+
+    assert calls, "应该至少跑过一次"
+    assert calls[0] >= 900, f"首次 tick 发生在 t={calls[0]}，早于一个 interval"
+
+
+def test_scheduler_default_ticks_immediately():
+    """默认（``delay_first=False``）首次 tick 立即跑——Emby 同步不烧额度。"""
+    fake_now = [0.0]
+    calls = []
+
+    class StopAt:
+        def __init__(self, limit):
+            self.limit = limit
+
+        def is_set(self):
+            return fake_now[0] >= self.limit
+
+        def set(self):
+            pass
+
+        def wait(self, t):
+            fake_now[0] += t
+
+    class S:
+        def sync(self):
+            calls.append(fake_now[0])
+            return SyncResult()
+
+    sch = EmbyScheduler(build_syncer=lambda: S(), interval=900,
+                        stop_event=StopAt(1800),
+                        clock=lambda: fake_now[0])
+    sch.run()
+
+    assert calls[0] == 0.0, f"默认应立即 tick，实际 t={calls[0]}"
+
+
+def test_scheduler_delay_first_stop_interrupts_deferred_wait():
+    """★ 推迟等待期间收到停止信号，必须立刻退出而不是空转一个 interval。"""
+    import threading
+    import time
+
+    calls = []
+    stop = threading.Event()
+
+    class S:
+        def sync(self):
+            calls.append(1)
+            return SyncResult()
+
+    sch = EmbyScheduler(build_syncer=lambda: S(), interval=3600,
+                        stop_event=stop, delay_first=True)
+    t = threading.Thread(target=sch.run, daemon=True)
+    t.start()
+    time.sleep(0.15)
+    stop.set()
+    t.join(timeout=2.0)
+    assert not t.is_alive(), "推迟等待未能被 stop_event 打断"
+    assert calls == [], "停止信号后不该再 tick"

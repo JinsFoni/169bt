@@ -1037,6 +1037,40 @@ select.input {
   gap: 7px;
 }
 
+/* ---------- 会话状态指示（FRONTEND.md §14.2）---------
+   只在异常或临近过期时出现；正常时 hidden。
+   颜色：警示用 --danger，临近过期用 --brass（都不是错误，只是提醒）。 */
+.session-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  margin-right: 10px;
+  border: 1px solid rgba(217,164,65,.42);
+  border-radius: var(--r-pill);
+  background: rgba(217,164,65,.10);
+  color: var(--brass);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.session-chip.is-warn {
+  border-color: rgba(224,87,74,.45);
+  background: rgba(224,87,74,.12);
+  color: var(--danger);
+}
+
+/* 窄屏顶栏空间紧：只压缩尺寸，**不隐藏**——
+   ★ 手机上恰恰最需要看到「会话已失效」，隐藏提醒等于把问题藏起来。 */
+@media (max-width: 640px) {
+  .session-chip {
+    padding: 3px 7px;
+    margin-right: 6px;
+    font-size: 11px;
+  }
+}
+
 .chip {
   padding: 6px 12px;
   border: 1px solid var(--line);

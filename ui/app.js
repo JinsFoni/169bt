@@ -169,8 +169,62 @@
   function loadStatus() {
     return window.api.getStatus().then(function (s) {
       tgConfigured = !!(s && s.telegram && s.telegram.configured);
+      renderSession(s && s.session);
       render();
     }).catch(function () { /* 保持原值 */ });
+  }
+
+  /*
+   * 会话状态指示（FRONTEND.md §14.2）。
+   *
+   * ★ **只在异常或临近过期时显示**：正常（ok 且剩 >5 天）时完全隐藏。
+   *   每天在顶栏挂一个「会话正常」是纯噪声——用户不关心能用的东西。
+   *
+   * ★ **不提供「重新登录」按钮**（FRONTEND.md §14.3）：登录是按 IP 限
+   *   5 次/900 秒的稀缺资源，让用户在手机上反复点会烧光额度。续期由
+   *   后端定时做，前端只负责让状态可见。
+   */
+  function renderSession(sess) {
+    var chip = document.getElementById('sessionChip');
+    if (!chip) return;
+
+    if (!sess || !sess.valid) {
+      chip.hidden = false;
+      chip.className = 'session-chip is-warn';
+      chip.textContent = '会话已失效';
+      chip.title = '请在设置页检查账号密码，或运行 bt169 login';
+      return;
+    }
+
+    var state = sess.relogin_state || 'ok';
+    if (state === 'failed') {
+      chip.hidden = false;
+      chip.className = 'session-chip is-warn';
+      chip.textContent = '登录异常';
+      chip.title = '自动续期失败，请检查账号密码';
+      return;
+    }
+    if (state === 'blocked') {
+      chip.hidden = false;
+      chip.className = 'session-chip is-warn';
+      chip.textContent = '续期受限';
+      chip.title = '登录额度不足或过于频繁，稍后自动重试';
+      return;
+    }
+
+    // ★ 剩余天数用 **<= 续期窗口** 判定，不写死 5：
+    //   窗口天数由后端给（renew_window_days），改后端阈值前端自动跟上。
+    var win = sess.renew_window_days || 5;
+    var days = sess.days_left;
+    if (typeof days === 'number' && days <= win) {
+      chip.hidden = false;
+      chip.className = 'session-chip';
+      chip.textContent = 'Cookie 剩 ' + days + ' 天';
+      chip.title = '后端将在到期前自动续期，无需操作';
+      return;
+    }
+
+    chip.hidden = true;      // 正常：不占视觉
   }
 
   function navTo(date) {
@@ -682,6 +736,7 @@
     get deleted() { return deleted; },
     get dates()   { return dateList; },
     get active()  { return activeDate; },
+    renderSession: renderSession,
     reload: boot
   };
 })();
