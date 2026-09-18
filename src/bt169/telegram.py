@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -39,7 +40,9 @@ __all__ = [
 log = logging.getLogger(__name__)
 
 #: Bot API 基址。测试通过注入 ``http`` 替身来避免真实网络。
-API_BASE = "https://api.telegram.org"
+#: ``BT169_TG_API_BASE`` 可覆盖——api.telegram.org 在部分网络下不可达，
+#: 用户需要指向自建反代。
+API_BASE = os.environ.get("BT169_TG_API_BASE") or "https://api.telegram.org"
 
 #: 批量转发时每条之间的最小间隔。
 #: ★ 群组限制约 20 条/分钟 → 3 秒是安全值（留足余量给别的客户端）。

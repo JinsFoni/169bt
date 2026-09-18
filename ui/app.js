@@ -39,7 +39,15 @@
   // TG 是否已配置（需求 T-4）。来自 /api/status，每次刷新日期时重取。
   // 未配置时「下载」按钮禁用 + 提示去设置页，而不是发一个注定 400 的请求。
   var tgConfigured = false;
-  var tgSending = false;
+
+  // ★ 两个独立的忙碌标志，不能共用一个：
+  //   - 单帖转发只该锁住那张卡片的按钮
+  //   - 批量转发只该锁住顶栏按钮
+  //   共用一个会让「转发一张卡片」把整个顶栏锁死。
+  //   而且**每个标志变化后必须重新 render()**——否则按钮会永远停在
+  //   禁用态（render 只在别处被调用时才会重算）。
+  var tgSendingOne = false;   // 单帖转发中
+  var tgSendingDay = false;   // 批量转发中
 
   /* ---------- 工具 ---------- */
 
@@ -246,13 +254,15 @@
             '<button class="act act-dl" type="button" data-act="dl"' +
               (locked
                 ? ' disabled title="尚未解锁 ED2K 链接"'
-                : (p.tg_sent_at
-                    ? ' title="已转发到 Telegram"'
-                    : (tgConfigured
-                        ? ' title="转发到 Telegram，由 Bot 侧下载"'
-                        : ' title="尚未配置 Telegram，请先到设置页填写"'))) + '>' +
+                : (tgSendingOne
+                    ? ' disabled title="正在转发…"'
+                    : (p.tg_sent_at
+                        ? ' title="已转发到 Telegram"'
+                        : (tgConfigured
+                            ? ' title="转发到 Telegram，由 Bot 侧下载"'
+                            : ' title="尚未配置 Telegram，请先到设置页填写"')))) + '>' +
               '<svg viewBox="0 0 20 20"><path d="M10 3.5v9m0 0 3.5-3.5M10 12.5 6.5 9M4 16.5h12"/></svg>' +
-              (p.tg_sent_at ? '已发' : '下载') + '</button>' +
+              (tgSendingOne ? '发送中' : (p.tg_sent_at ? '已发' : '下载')) + '</button>' +
             '<button class="act act-del" type="button" data-act="del" title="删除这条记录" aria-label="删除">' +
               '<svg viewBox="0 0 20 20"><path d="M4 6.5h12M8.5 6.5V5a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v1.5M6 6.5l.7 8.4a1 1 0 0 0 1 .9h4.6a1 1 0 0 0 1-.9l.7-8.4"/></svg>' +
             '</button>' +
@@ -285,8 +295,8 @@
       ? '复制当日全部 ED2K 链接 · ' + copyable + ' 条'
       : '当日没有可复制的 ED2K 链接';
 
-    /* 顶栏「下载本日」（T-2）。两个独立条件：没链接 / 没配 TG。 */
-    if (tgSending) {
+    /* 顶栏「下载本日」（T-2）。三个独立条件：转发中 / 没链接 / 没配 TG。 */
+    if (tgSendingDay) {
       dlDay.disabled = true;
       dlDay.title = '正在转发…';
     } else if (copyable === 0) {
@@ -456,17 +466,18 @@
             { duration: 4000 });
       return;
     }
-    if (tgSending) return;
-    tgSending = true;
+    if (tgSendingOne) return;
+    tgSendingOne = true;
+    render();
 
     api.forward(p.tid).then(function () {
       toast('已转发 ' + p.code + ' 到 Telegram', 'ok', { duration: 2400 });
       p.tg_sent_at = new Date().toISOString();
-      render();
     }).catch(function (e) {
       toast(tgMessage(e, p.code), 'err', { duration: 4000 });
     }).then(function () {
-      tgSending = false;
+      tgSendingOne = false;
+      render();            // ★ 必须重算：否则按钮停在禁用态
     });
   }
 
@@ -506,16 +517,16 @@
             { duration: 4000 });
       return;
     }
-    if (tgSending) return;
+    if (tgSendingDay) return;
 
     // ★ 后端串行发送、每条间隔 ≥3 秒（TG 限流），十几帖要几十秒。
     //   按钮必须进入忙碌态，否则用户会以为没反应而反复点击。
-    tgSending = true;
-    dlDay.disabled = true;
+    tgSendingDay = true;
+    render();
     var n = links.length;
     toast('正在转发 ' + n + ' 条到 Telegram…', 'ok', { duration: 60000 });
 
-    api.forwardDay(activeDate).then(function (r) {
+    api.forwardDay(activeDate, n).then(function (r) {
       var parts = [];
       if (r.sent)    parts.push('成功 ' + r.sent);
       if (r.skipped) parts.push('已发过 ' + r.skipped);
@@ -529,7 +540,7 @@
     }).catch(function (e) {
       toast(tgMessage(e, '当日'), 'err', { duration: 4500 });
     }).then(function () {
-      tgSending = false;
+      tgSendingDay = false;
       render();
     });
   }

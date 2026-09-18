@@ -389,3 +389,23 @@ def test_base_trailing_slash_stripped():
                        base="http://127.0.0.1:8898/")
     c.send_message("x")
     assert "//bot" not in c.http.calls[0][0]
+
+
+def test_api_base_env_override(monkeypatch):
+    """★ api.telegram.org 在部分网络下不可达，必须能指向自建反代。
+
+    模块级常量在 import 时求值，所以这条只能测「读了环境变量」这个事实
+    （用子进程重载模块才能真正验证）。这里直接验证当前值来自环境。
+    """
+    import importlib
+    import bt169.telegram as tg
+
+    monkeypatch.setenv("BT169_TG_API_BASE", "http://proxy.local:8080")
+    importlib.reload(tg)
+    try:
+        assert tg.API_BASE == "http://proxy.local:8080"
+        c = tg.TelegramClient(token="t", chat_id="1", http=FakeHTTP())
+        assert c.base == "http://proxy.local:8080"
+    finally:
+        monkeypatch.delenv("BT169_TG_API_BASE", raising=False)
+        importlib.reload(tg)
