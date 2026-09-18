@@ -42,6 +42,78 @@ class PostRepo:
         ).fetchone()
         return Post.from_row(row) if row else None
 
+    def exists(self, tid: int) -> bool:
+        """tid 是否已入库（**任意状态**）。
+
+        采集的跳过规则是「数据库里有的就跳过」，与状态无关。
+        用 ``SELECT 1 ... LIMIT 1`` 而非 ``COUNT(*)``：走主键索引即返回。
+        """
+        row = self._db.read().execute(
+            "SELECT 1 FROM posts WHERE tid=? LIMIT 1", (tid,)
+        ).fetchone()
+        return row is not None
+
+    def existing_tids(self, tids: list[int]) -> set[int]:
+        """批量查询哪些 tid 已存在。
+
+        采集时先用这个批量预筛，可以省掉逐条查询的往返。
+        """
+        if not tids:
+            return set()
+        out: set[int] = set()
+        # SQLite 变量数上限 999（旧版）/ 32766（3.32+），分批保守处理
+        for i in range(0, len(tids), 500):
+            chunk = tids[i : i + 500]
+            ph = ",".join("?" * len(chunk))
+            rows = self._db.read().execute(
+                f"SELECT tid FROM posts WHERE tid IN ({ph})", chunk
+            ).fetchall()
+            out.update(r["tid"] for r in rows)
+        return out
+
+    def upsert_collected(
+        self,
+        *,
+        tid: int,
+        title: str,
+        code: str | None,
+        actress: str | None,
+        release_date: str | None,
+        size: str | None,
+        cover_img: str | None,
+        detail_img: str | None,
+        ed2k: str | None,
+        post_date: str,
+        status: str,
+    ) -> None:
+        """写入一条采集结果。
+
+        ``ON CONFLICT`` 只在**同一 tid 被重新采集**时触发（例如上一轮
+        ``failed`` 被用户重跑），此时**保留**已有的 emby/tg 派生状态——
+        那些字段的更新由各自的流程负责，不该被采集覆盖成 NULL。
+        """
+        if status not in VALID_STATUSES:
+            raise ValueError(f"非法状态：{status}")
+        now = now_iso()
+        with self._db.write() as conn:
+            conn.execute(
+                "INSERT INTO posts(tid, title, code, actress, release_date, size,"
+                " cover_img, detail_img, ed2k, post_date, status, retry_count,"
+                " created_at, updated_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,0,?,?)"
+                " ON CONFLICT(tid) DO UPDATE SET"
+                " title=excluded.title, code=excluded.code,"
+                " actress=excluded.actress, release_date=excluded.release_date,"
+                " size=excluded.size, cover_img=excluded.cover_img,"
+                " detail_img=excluded.detail_img, ed2k=excluded.ed2k,"
+                " post_date=excluded.post_date, status=excluded.status,"
+                " last_error=NULL, next_retry_at=NULL, updated_at=excluded.updated_at",
+                (
+                    tid, title, code, actress, release_date, size, cover_img,
+                    detail_img, ed2k, post_date, status, now, now,
+                ),
+            )
+
     def count_by_status(self) -> dict[str, int]:
         rows = self._db.read().execute(
             "SELECT status, COUNT(*) AS c FROM posts GROUP BY status"

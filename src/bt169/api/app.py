@@ -42,11 +42,13 @@ def create_app(
 
     _install_error_handler(app)
 
-    from bt169.api.routes import health, posts, settings
+    from bt169.api.routes import collect, health, posts, settings, status
 
     app.include_router(health.router)
     app.include_router(posts.router)
     app.include_router(settings.router)
+    app.include_router(collect.router)
+    app.include_router(status.router)
 
     # 静态资源必须**最后**挂载：Starlette 按注册顺序匹配，
     # 挂在 "/" 的 StaticFiles 会吞掉之后注册的所有路由。
