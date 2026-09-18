@@ -216,6 +216,14 @@
       ? '<img src="' + esc(p.cover) + '" alt="" loading="lazy" data-img>'
       : '';
 
+    // E-2/E-3：已入库在**图片区右上角**显示标记；未入库**什么都不显示**。
+    // 只标「有」不标「无」——每张卡片都挂个「未入库」是纯视觉噪声。
+    if (p.emby_in_library) {
+      media += '<span class="lib-badge" title="已在 Emby 媒体库中">' +
+                 '<svg viewBox="0 0 20 20" aria-hidden="true">' +
+                 '<path d="M4.5 10.5 8 14l7.5-8"/></svg>已入库</span>';
+    }
+
     var durHTML = dur
       ? '<span class="meta-item"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.25"/><path d="M10 6v4.2l2.8 1.7"/></svg>' + esc(dur) + '</span>'
       : '';

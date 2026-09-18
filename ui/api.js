@@ -151,6 +151,15 @@
     },
     testTelegram: function () {
       return request('POST', '/api/settings/test/telegram');
+    },
+
+    // Emby 入库标记（P7）。两个都返回 200 + {ok, error}，不用错误分支。
+    // ★ refreshEmby 内部会同步整个媒体库，大库可能要几十秒，给足超时。
+    refreshEmby: function () {
+      return request('POST', '/api/emby/refresh', undefined, 120000);
+    },
+    getEmbyLibraries: function () {
+      return request('GET', '/api/emby/libraries');
     }
   };
 

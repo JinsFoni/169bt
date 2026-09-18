@@ -301,6 +301,41 @@ body::before {
 .card.no-link .card-media img { filter: grayscale(.72) brightness(.72); }
 .card.no-link:hover .card-media img { filter: grayscale(.45) brightness(.8); }
 
+/* ---------- Emby「已入库」标记（E-2/E-3）----------
+   只在**已入库**时出现（未入库不显示任何标记，避免视觉噪声）。
+   背景用实色深底而非半透明：半透明叠在任意封面图上，对比度不可控。
+   --ink-900 底 + --cyan 字实测对比度见 ui/DESIGN.md。 */
+.lib-badge {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 9px 4px 7px;
+  border-radius: var(--r-pill);
+  background: var(--ink-900);
+  color: var(--cyan);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .01em;
+  line-height: 1.5;
+  box-shadow: 0 1px 6px rgba(0,0,0,.55);
+  pointer-events: none;   /* 不挡住封面点击/悬浮 */
+}
+
+.lib-badge svg {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 /* ---------- 信息区 ---------- */
 
 .card-info {

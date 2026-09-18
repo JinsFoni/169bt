@@ -47,6 +47,17 @@ class PostRepo:
         ).fetchone()
         return Post.from_row(row) if row else None
 
+    def all_posts(self) -> list[Post]:
+        """全部帖子（不限状态、不限日期）。
+
+        供 Emby 同步（E-1~E-7）使用：入库标记与帖子是否解锁无关，
+        也不该只同步某一天。
+        """
+        rows = self._db.read().execute(
+            "SELECT * FROM posts ORDER BY tid DESC"
+        ).fetchall()
+        return [Post.from_row(r) for r in rows]
+
     def exists(self, tid: int) -> bool:
         """tid 是否已入库（**任意状态**）。
 

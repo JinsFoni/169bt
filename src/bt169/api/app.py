@@ -23,6 +23,7 @@ def create_app(
     box: SecretBox,
     ui_dir: Path | None = UI_DIR,
     image_dir: Path | None = IMAGE_DIR,
+    emby_interval: float = 0,
 ) -> FastAPI:
     """装配应用。
 
@@ -31,6 +32,11 @@ def create_app(
         box: 设置密钥字段的加解密器。
         ui_dir: 前端目录；``None`` 表示不挂载静态资源（API 单测用）。
         image_dir: 本地化图片目录（W-15）；``None`` 表示不挂载 ``/img``。
+        emby_interval: Emby 定时同步间隔（秒）。
+            ★ **默认 0 = 不启定时器**：每个测试都建 app，默认开启会
+            给每个测试起一个后台线程（且一启动就跑一次同步），既慢又容易
+            变成不可复现的闪烁。生产入口 ``__main__.serve`` 显式传
+            ``None`` 启用（见 E-6）。
     """
     app = FastAPI(
         title="169bt 归档台",
@@ -38,17 +44,19 @@ def create_app(
         docs_url=None,          # 个人自用，不需要 Swagger UI 暴露面
         redoc_url=None,
         openapi_url=None,
+        lifespan=_make_lifespan(emby_interval),
     )
     app.state.db = db
     app.state.box = box
     app.state.image_dir = image_dir
 
     _install_error_handler(app)
-
+    _install_emby_scheduler(app, emby_interval)
     from bt169.api.gate import GateMiddleware
     from bt169.api.routes import (
         auth,
         collect,
+        emby,
         health,
         posts,
         settings,
@@ -67,6 +75,7 @@ def create_app(
     app.include_router(collect.router)
     app.include_router(status.router)
     app.include_router(telegram.router)
+    app.include_router(emby.router)
 
     # 静态资源必须**最后**挂载：Starlette 按注册顺序匹配，
     # 挂在 "/" 的 StaticFiles 会吞掉之后注册的所有路由。
@@ -90,6 +99,64 @@ def create_app(
         app.mount("/", StaticFiles(directory=str(ui_dir), html=True), name="ui")
 
     return app
+
+
+def _make_lifespan(interval: float):
+    """构造 lifespan：启动/停止 Emby 定时器（E-6）。
+
+    ★ 用 ``lifespan`` 而非已弃用的 ``on_event``：后者会在每次注册时
+    追加处理器，且 FastAPI 已标记弃用。
+
+    ★ 间隔为 0 时返回一个什么都不做的 lifespan——测试入口就是这种。
+    """
+    if not interval:
+        return None
+
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        scheduler = _build_emby_scheduler(app, interval)
+        app.state.emby_scheduler = scheduler
+        scheduler.start()
+        try:
+            yield
+        finally:
+            scheduler.stop()
+
+    return lifespan
+
+
+def _build_emby_scheduler(app: FastAPI, interval: float):
+    """构造定时同步器。每次 tick 重建同步器——用户在设置页改地址后无需重启。"""
+    from bt169.emby import SYNC_INTERVAL_SECONDS, EmbyScheduler, EmbySyncer
+
+    def build():
+        from bt169.api.routes.emby import build_client
+        from bt169.repo.posts import PostRepo
+        from bt169.repo.settings import SettingsRepo
+
+        return EmbySyncer(
+            client=build_client(SettingsRepo(app.state.db, app.state.box)),
+            posts_repo=PostRepo(app.state.db),
+        )
+
+    # 哨兵：负数表示「用默认间隔」。0 已在 _make_lifespan 拦掉。
+    return EmbyScheduler(
+        build_syncer=build,
+        interval=SYNC_INTERVAL_SECONDS if interval < 0 else interval,
+    )
+
+
+def _install_emby_scheduler(app: FastAPI, interval: float) -> None:
+    """兼容入口：定时器由 lifespan 启动，这里只保留 state 便于单测断言。
+
+    ★ 不在这里启动：``create_app`` 返回时还没进入 lifespan，此时
+    启动会让测试里的 ``TestClient`` 之外也跑起后台线程。
+    """
+    if not interval:
+        return
+    app.state.emby_scheduler = _build_emby_scheduler(app, interval)
 
 
 class _ImmutableStaticFiles(StaticFiles):

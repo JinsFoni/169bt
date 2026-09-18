@@ -130,10 +130,59 @@
   }
 
   function load() {
-    return window.api.getSettings().then(fill).catch(function (e) {
+    return window.api.getSettings().then(function (data) {
+      fill(data);
+      // ★ 媒体库下拉框的选项**不来自设置**，来自 Emby 的库列表。
+      //   每次打开面板都重拉：用户可能刚在 Emby 里建了新库。
+      loadLibraries(data && data.emby ? data.emby.library : '');
+    }).catch(function (e) {
       toast('无法读取设置：' + e.message, 'err', { duration: 5000 });
     });
   }
+
+  /*
+   * 拉 Emby 媒体库列表填进下拉框。
+   *
+   * ★ 失败静默：Emby 没配或连不上时，下拉框退化为只有一个「全部媒体库」，
+   *   不弹错误。用户可能只是还没填地址——此时报错是噪声（E-7 同样的思路）。
+   * ★ 但**已保存的库 id 必须保留为选中项**：列表拉不到时若把 value 清空，
+   *   用户一保存就把已配好的库弄丢了。
+   */
+  function loadLibraries(savedId) {
+    var sel = $('embyLib');
+    if (!sel) return;
+
+    window.api.getEmbyLibraries().then(function (res) {
+      var keep = savedId || sel.value || '';
+      var opts = ['<option value="">全部媒体库</option>'];
+      ((res && res.libraries) || []).forEach(function (lib) {
+        opts.push('<option value="' + escAttr(lib.id) + '">' +
+                  escHtml(lib.name) + '</option>');
+      });
+
+      // 已保存的 id 不在列表里（Emby 里删了/还没加载）也要保留，
+      // 否则保存一次就静默丢掉配置。
+      var known = ((res && res.libraries) || []).some(function (l) {
+        return String(l.id) === String(keep);
+      });
+      if (keep && !known) {
+        opts.push('<option value="' + escAttr(keep) + '">' +
+                  escHtml(keep) + '（当前）</option>');
+      }
+
+      sel.innerHTML = opts.join('');
+      sel.value = keep;
+    }).catch(function () { /* 静默，见上 */ });
+  }
+
+  function escHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;',
+               "'": '&#39;' }[c];
+    });
+  }
+
+  function escAttr(s) { return escHtml(s); }
 
   /* ---------- 保存：按分区提交 ---------- */
 
@@ -234,10 +283,54 @@
     });
   }
 
+  /*
+   * 触发一次 Emby 同步（E-6 的手动刷新）。
+   *
+   * ★ 必须先保存再刷：后端从**数据库**读 Emby 地址与 Key，用户刚输入的值
+   *   还在 DOM 里。不先保存的话，刷新用的是**旧配置**——用户填好新地址、
+   *   点刷新、得到「未配置」，一头雾水。与 testTg 同一个坑。
+   */
+  function testEmby(btn) {
+    btn.disabled = true;
+    setState('emby', '正在同步…');
+
+    var saved = collect('emby');
+    var keyIsPlaceholder = saved.api_key === PLACEHOLDER;
+
+    var prep = keyIsPlaceholder
+      ? Promise.resolve(null)
+      : window.api.saveSettings('emby', saved);
+
+    prep.then(function () {
+      return window.api.refreshEmby();
+    }).then(function (res) {
+      btn.disabled = false;
+      if (res && res.ok) {
+        var msg = '已检查 ' + res.checked + ' 帖，命中 ' + res.in_library + ' 帖';
+        setState('emby', msg, 'ok');
+        toast('入库状态已刷新：' + msg, 'ok', { duration: 3600 });
+        // 卡片标记变了，重新拉一次列表（app.js 暴露的是 window.__archive）
+        var a = window.__archive;
+        if (a && a.reload) a.reload();
+      } else {
+        var detail = (res && res.error) || '未知原因';
+        setState('emby', detail, 'err');
+        toast('同步失败：' + detail, 'err', { duration: 6000 });
+      }
+      // 顺手刷新库列表（地址改了以后库可能不同）
+      loadLibraries($('embyLib') ? $('embyLib').value : '');
+    }).catch(function (e) {
+      btn.disabled = false;
+      setState('emby', e.message, 'err');
+      toast('同步失败：' + e.message, 'err', { duration: 6000 });
+    });
+  }
+
   modal.addEventListener('click', function (e) {
     var btn = e.target.closest('[data-test]');
     if (!btn) return;
     if (btn.dataset.test === 'tg') testTg(btn);
+    if (btn.dataset.test === 'emby') testEmby(btn);
   });
 
   /* ---------- 拦截 app.js 的方向键翻页 ---------- */

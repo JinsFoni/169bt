@@ -94,7 +94,9 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     db.migrate()
     box = _load_or_create_key()
 
-    app = create_app(db, box=box, ui_dir=config.UI_DIR)
+    # ★ emby_interval=-1 启用定时同步（E-6，默认 15 分钟）。
+    #   测试入口用默认的 0（不启），否则每个测试都会多一个后台线程。
+    app = create_app(db, box=box, ui_dir=config.UI_DIR, emby_interval=-1)
     print(f"→ http://{args.host}:{args.port}")
     try:
         uvicorn.run(
@@ -308,6 +310,57 @@ def _image_checks(db) -> list[tuple[str, bool, str, str]]:  # type: ignore[no-un
     return out
 
 
+def _emby_checks(db) -> list[tuple[str, bool, str, str]]:  # type: ignore[no-untyped-def]
+    """Emby 入库标记状态（E-1~E-7）。
+
+    ★ **不发网络请求**：doctor 不该因为 Emby 没开机而变慢或报错。
+    这里只检查本地状态（是否配置、标记是否已同步过）。
+    """
+    from bt169 import config
+
+    checks: list[tuple[str, bool, str, str]] = []
+
+    row = db.read().execute(
+        "SELECT COUNT(*) AS n FROM settings WHERE key IN (?,?)",
+        (config.section_key("emby", "url"),
+         config.section_key("emby", "api_key")),
+    ).fetchone()
+    configured = (row["n"] or 0) == 2
+
+    checks.append((
+        "Emby 配置",
+        True,
+        "已配置" if configured else "未配置",
+        "" if configured else "未配置时不显示「已入库」标记，浏览不受影响（E-7）",
+    ))
+
+    stats = db.read().execute(
+        "SELECT COUNT(*) AS total,"
+        " SUM(CASE WHEN emby_status='in_library' THEN 1 ELSE 0 END) AS lib,"
+        " SUM(CASE WHEN emby_checked IS NOT NULL THEN 1 ELSE 0 END) AS checked"
+        " FROM posts"
+    ).fetchone()
+
+    total = stats["total"] or 0
+    checked = stats["checked"] or 0
+    lib = stats["lib"] or 0
+
+    if total == 0:
+        detail = "暂无帖子"
+    elif checked == 0:
+        detail = f"{total} 帖尚未核对"
+    else:
+        detail = f"已核对 {checked}/{total} 帖，命中 {lib} 帖"
+
+    checks.append((
+        "Emby 入库标记",
+        True,
+        detail,
+        "" if checked else "打开设置页点「刷新入库状态」即可同步",
+    ))
+    return checks
+
+
 def _auth_checks(db) -> list[tuple[str, bool, str, str]]:  # type: ignore[no-untyped-def]
     """访问门禁与面板会话状态（S-6）。"""
     from bt169.api.auth import cleanup_sessions
@@ -393,6 +446,7 @@ def _cmd_doctor() -> int:
         checks.append((f"帖子总数 {n}", True, "", ""))
         checks.extend(_image_checks(db))
         checks.extend(_auth_checks(db))
+        checks.extend(_emby_checks(db))
     except Exception as exc:
         checks.append(("数据库可用", False, str(exc), ""))
     finally:
