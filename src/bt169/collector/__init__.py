@@ -188,7 +188,6 @@ class Collector:
             job.id, phase="fetching", total=len(tids), pages=pages,
             message=f"发现 {len(tids)} 个帖子，开始抓取",
         )
-
         # ---------------- 阶段 2：抓取
 
         def _tick() -> None:
@@ -209,7 +208,7 @@ class Collector:
             except Exception:  # noqa: BLE001
                 log.warning("进度回调异常（已忽略）", exc_info=True)
 
-        for tid in tids:
+        for tid, post_date in tids:
             if self._jobs.is_cancel_requested(job.id):
                 current = self._jobs.get(job.id)
                 done = current.processed if current else 0
@@ -236,7 +235,7 @@ class Collector:
 
             self._jobs.update(job.id, current_tid=tid)
             try:
-                self._collect_one(tid, job.from_date)
+                self._collect_one(tid, post_date)
                 self._jobs.bump(job.id, processed=1, collected=1)
                 _tick()
             except LoginRequired as exc:
@@ -261,14 +260,19 @@ class Collector:
 
     # ---------------------------------------------------------------- 发现
 
-    def _discover(self, job: CollectJob, wanted: set[str]) -> tuple[list[int], int]:
-        """翻列表页收集 tid。
+    def _discover(
+        self, job: CollectJob, wanted: set[str]
+    ) -> tuple[list[tuple[int, str]], int]:
+        """翻列表页收集 ``(tid, post_date)``。
 
-        返回 ``(tids, pages)``。tids **按发现顺序**（= 时间降序）。
+        返回 ``(found, pages)``。found **按发现顺序**（= 时间降序）。
+
+        ★ 必须带上**每一帖自己的**日期：早先只返回 tid，调用方拿
+        ``job.from_date`` 当归档日期，跨日采集时会把范围里所有帖
+        都错分到范围起始那天。
         """
-        tids: list[int] = []
+        found: list[tuple[int, str]] = []
         seen: set[int] = set()
-        newest = max(wanted)
         oldest = min(wanted)
 
         for page in range(1, config.MAX_BACKFILL_PAGES + 1):
@@ -284,7 +288,7 @@ class Collector:
             for row in rows:
                 if row.post_date and row.post_date in wanted and row.tid not in seen:
                     seen.add(row.tid)
-                    tids.append(row.tid)
+                    found.append((row.tid, row.post_date))
 
             if not page_dates:
                 # 整页都没解析出日期：结构可能变了，继续翻页风险大
@@ -294,14 +298,11 @@ class Collector:
             # ★ 提前退出：本页最旧日期已早于范围下界，后续页只会更早
             if min(page_dates) < oldest:
                 break
-            # 本页最新日期都已早于下界（理论上不会发生，防御性）
-            if max(page_dates) < oldest:
-                break
 
             log.debug("第 %s 页：%s → %s（累计 %s 个）",
-                      page, max(page_dates), min(page_dates), len(tids))
+                      page, max(page_dates), min(page_dates), len(found))
 
-        return tids, page
+        return found, page
 
     # ---------------------------------------------------------------- 单帖
 

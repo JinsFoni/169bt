@@ -9,17 +9,24 @@ DOM 定位用 ``selectolax``，正则只用于字段值提取。
 
 from __future__ import annotations
 
+import html as _html
 import re
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta, timezone
+from email.utils import parsedate_to_datetime
 
 from selectolax.parser import HTMLParser
 
 __all__ = [
     "ListRow",
+    "RssItem",
     "ThreadDetail",
     "parse_thread_list",
     "parse_thread_detail",
+    "parse_rss",
+    "parse_rss_date",
+    "tid_from_link",
     "normalize_date",
     "extract_ed2k",
     "extract_codes",
@@ -42,6 +49,12 @@ ED2K_RE = re.compile(r"ed2k://\|file\|[^|\r\n]+\|\d+\|[0-9A-Fa-f]+\|/")
 #: ``name=`` 在前，但没有理由赌它永远如此。
 _FORMHASH_RE = re.compile(r'<input\b[^>]*\bname="formhash"[^>]*>', re.I)
 _VALUE_ATTR_RE = re.compile(r'\bvalue="([^"]*)"', re.I)
+
+#: `tid=` 查询参数。用 `[?&]` 锚定，避免 `xtid=` 之类误命中。
+_TID_RE = re.compile(r"[?&]tid=(\d+)")
+
+#: 归档日期统一用 UTC+8（事实 #13：RSS 是 UTC，帖子页是 UTC+8）。
+TZ_ARCHIVE = timezone(timedelta(hours=8))
 
 #: 「作者」块中的绝对日期（Discuz 对老帖直接输出文本而非 title 属性）。
 _ABS_DATE_RE = re.compile(r"(\d{4})-(\d{1,2})-(\d{1,2})")
@@ -118,6 +131,102 @@ class ThreadDetail:
 
 
 # ------------------------------------------------------------------ 工具
+
+
+# ------------------------------------------------------------------ RSS 发现
+
+
+@dataclass(frozen=True, slots=True)
+class RssItem:
+    """RSS 的一条 ``<item>``。
+
+    只保留**发现新帖**所需的三个字段。RSS 的 ``<description>`` 被截断到
+    ~150–200 字且**不含 ed2k**（事实 #2），因此这里刻意不解析它——
+    解析了也没用，反而会诱使调用方拿它当详情用。
+    """
+
+    tid: int
+    title: str
+    post_date: str      # YYYY-MM-DD（UTC+8）
+
+
+def tid_from_link(link: str) -> int | None:
+    """从 ``<link>`` 里取 tid。
+
+    RSS 里是 ``&amp;`` 转义形式（``...viewthread&amp;tid=3986000``），
+    所以先解码再匹配。属性顺序无关。
+    """
+    if not link:
+        return None
+    m = _TID_RE.search(_html.unescape(link))
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except ValueError:      # pragma: no cover - 正则已保证是数字
+        return None
+
+
+def parse_rss_date(raw: str) -> str | None:
+    """``pubDate`` → ``YYYY-MM-DD``（UTC+8）。
+
+    ★ 必须做时区换算（C-9）。RSS 是 UTC，而归档分组依据的「发帖日期」
+    是 UTC+8。UTC 16:00–23:59 发的帖在 UTC+8 已是**次日**，直接取 UTC
+    日期会把它分到错的那一天。
+
+    输入自带偏移量时按它自己算（不再平移），无偏移量时按 UTC 处理。
+    """
+    if not raw:
+        return None
+    try:
+        dt = parsedate_to_datetime(raw.strip())
+    except (TypeError, ValueError):
+        return None
+    if dt is None:          # pragma: no cover - 旧版 Python 的边界行为
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(TZ_ARCHIVE).date().isoformat()
+
+
+def parse_rss(xml: str) -> list[RssItem]:
+    """解析 RSS 订阅，返回**按 feed 原顺序**的条目。
+
+    ★ 全函数容错：任何解析失败都退化为空列表，绝不抛异常。
+    轮询是后台定时任务，为一条畸形 feed 把整个采集器打挂不值得。
+
+    实测坑（事实 #21 的反面）：``rss.php?fid=192`` 会被 WAF 拦下并返回
+    **404 HTML 页面**，不是 XML。所以这里不能假设输入是 XML。
+
+    ★ 用 ``xml.etree`` 而非 ``selectolax``：HTML5 解析器把 ``<link>`` 当作
+    **空元素**（HTML 里 ``<link>`` 是 void tag），于是 ``<link>URL</link>``
+    的 URL 被当成游离文本丢掉，每个条目的 tid 都取不到。实测 selectolax
+    在真实 feed 上返回 0 条，ElementTree 返回 20 条。
+
+    跳过而非保留的条目：缺 tid / 缺 pubDate。
+    缺 tid 就没法抓详情；缺日期就没法归档——拿「今天」顶替会把老帖
+    错分到当前归档日，是**数据正确性**问题，不是容错问题。
+    """
+    if not xml or "<item" not in xml:
+        return []
+    try:
+        root = ET.fromstring(xml)
+    except ET.ParseError:
+        # ★ WAF 返回的是 404 HTML（实测 ``rss.php?fid=192``），不是 XML。
+        #   这里不是「意外错误」，是预期内的输入形态。
+        return []
+
+    out: list[RssItem] = []
+    for node in root.iter("item"):
+        tid = tid_from_link(node.findtext("link") or "")
+        if tid is None:
+            continue
+        post_date = parse_rss_date(node.findtext("pubDate") or "")
+        if post_date is None:
+            continue
+        title = (node.findtext("title") or "").strip()
+        out.append(RssItem(tid=tid, title=title, post_date=post_date))
+    return out
 
 
 def normalize_date(raw: str) -> str | None:

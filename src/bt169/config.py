@@ -67,7 +67,16 @@ def parse_rss_url(raw: str) -> tuple[str, str]:
     """从 RSS 订阅链接解析出版块 fid，并返回清洗后的 URL。
 
     实测（REQUIREMENTS.md 事实 #21）：RSS 匿名完全可用，``auth`` 参数被服务端忽略。
-    因此清洗时**只保留 fid**——不必要地在 URL 里携带账号凭据是安全风险。
+    因此清洗时**只保留 ``mod=rss`` 与 ``fid``**——不必要地在 URL 里携带
+    账号凭据是安全风险。
+
+    ★ **``mod=rss`` 绝不能丢**。这是本函数曾经的 bug：清洗后剩
+    ``forum.php?fid=192``，看着像个正常的版块页，实测却返回 57 KB 的
+    **版块 HTML**（0 个 ``<item>``）而不是 16 KB 的 RSS（20 个 ``<item>``）。
+    轮询会把 HTML 当 feed 解析，静默拿到空列表，永远发现不了新帖。
+
+    顺带把 Discuz 的 ``rss.php?fid=N`` 写法归一成 canonical 形式：
+    实测 ``rss.php`` 会被 WAF 拦下返回 404。
 
     Args:
         raw: 用户填写的完整 RSS URL。
@@ -76,7 +85,7 @@ def parse_rss_url(raw: str) -> tuple[str, str]:
         ``(fid, clean_url)``。
 
     Raises:
-        ConfigError: URL 为空、非法，或缺 ``fid`` 参数。
+        ConfigError: URL 为空、非法，缺 ``fid``，或 ``mod`` 不是 ``rss``。
     """
     raw = (raw or "").strip()
     if not raw:
@@ -86,13 +95,26 @@ def parse_rss_url(raw: str) -> tuple[str, str]:
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise ConfigError(f"RSS 订阅链接必须是完整的 http(s) URL：{raw!r}")
 
-    fid = (parse_qs(parsed.query).get("fid") or [""])[0].strip()
+    query = parse_qs(parsed.query)
+    fid = (query.get("fid") or [""])[0].strip()
     if not fid:
         raise ConfigError("RSS 订阅链接缺少 fid 参数（版块 ID）")
     if not fid.isdigit():
         raise ConfigError(f"fid 必须是数字：{fid!r}")
 
-    clean = urlunparse(parsed._replace(query=f"fid={fid}", fragment=""))
+    # mod 缺省时按「订阅链接」补齐；显式写成别的模块则拒绝——
+    # 用户可能误贴了版块浏览页，静默改写会掩盖这个错误。
+    mod = (query.get("mod") or ["rss"])[0].strip().lower()
+    if mod != "rss":
+        raise ConfigError(
+            f"这不是 RSS 订阅链接（mod={mod!r}）；"
+            "应形如 forum.php?mod=rss&fid=192"
+        )
+
+    # ★ 路径也归一到 forum.php：rss.php 会被 WAF 拦（实测 404）。
+    clean = urlunparse(
+        parsed._replace(path="/forum.php", query=f"mod=rss&fid={fid}", fragment="")
+    )
     return fid, clean
 
 

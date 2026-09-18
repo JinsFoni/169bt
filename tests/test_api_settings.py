@@ -72,13 +72,40 @@ def test_placeholder_means_unchanged(client, db, box):
 
 
 def test_rss_url_is_cleaned_on_save(client, db, box):
-    """实测：RSS 匿名可用 → auth 参数必须被剥掉。"""
+    """实测：RSS 匿名可用 → auth 参数必须被剥掉，但 ``mod=rss`` 必须保留。
+
+    丢掉 ``mod=rss`` 拿到的是版块 HTML（实测 57 KB / 0 个 item），
+    不是订阅（16 KB / 20 个 item）。
+    """
     from bt169.repo.settings import SettingsRepo
     client.put("/api/settings", json={
         "section": "site",
         "values": {"rss_url": "https://169bt.com/forum.php?mod=rss&fid=192&auth=deadbeef"},
     })
-    assert SettingsRepo(db, box).get("site.rss_url") == "https://169bt.com/forum.php?fid=192"
+    assert SettingsRepo(db, box).get("site.rss_url") == \
+        "https://169bt.com/forum.php?mod=rss&fid=192"
+
+
+def test_rss_url_without_mod_is_completed(client, db, box):
+    """用户只贴版块 URL 时补上 ``mod=rss``（这个设置项就是「订阅链接」）。"""
+    from bt169.repo.settings import SettingsRepo
+    r = client.put("/api/settings", json={
+        "section": "site",
+        "values": {"rss_url": "https://169bt.com/forum.php?fid=192"},
+    })
+    assert r.status_code == 200
+    assert SettingsRepo(db, box).get("site.rss_url") == \
+        "https://169bt.com/forum.php?mod=rss&fid=192"
+
+
+def test_rss_url_with_wrong_mod_rejected(client):
+    """贴了版块浏览页 → 拒绝，而不是静默改写成 rss。"""
+    r = client.put("/api/settings", json={
+        "section": "site",
+        "values": {"rss_url": "https://169bt.com/forum.php?mod=forumdisplay&fid=192"},
+    })
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "bad_rss_url"
 
 
 def test_rss_url_without_fid_rejected(client):

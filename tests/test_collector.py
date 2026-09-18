@@ -911,3 +911,38 @@ def test_nolink_post_still_skipped(env):
     result = c.run(from_date="2026-09-14", to_date="2026-09-14")
     assert result.skipped == 1
     assert fc.fetch_calls == []
+
+
+# ------------------------------------------------------------ 归档日期正确性
+
+
+def test_post_date_comes_from_row_not_range_start(env):
+    """★ 归档日期必须是**该帖自己**的日期，不是采集范围的下界。
+
+    实测坑：``_collect_one(tid, job.from_date)`` 把范围内每一帖都盖上
+    范围**起始**日期。单日采集看不出来（起始日 = 该日），一旦跨日
+    采集，2026-09-14 的帖会被错分到 2026-09-13 的归档日下。
+    """
+    db, posts, jobs = env
+    fc = FakeForum(
+        pages={1: rows((101, "2026-09-14"), (102, "2026-09-13"))},
+        details={101: make_detail(101), 102: make_detail(102)},
+    )
+    Collector(client=fc, posts=posts, jobs=jobs).run(  # type: ignore[arg-type]
+        from_date="2026-09-13", to_date="2026-09-14")
+    assert posts.get(101).post_date == "2026-09-14"
+    assert posts.get(102).post_date == "2026-09-13"
+
+
+def test_post_date_survives_multi_day_range(env):
+    """跨 3 天范围，三帖各归各日。"""
+    db, posts, jobs = env
+    fc = FakeForum(
+        pages={1: rows((101, "2026-09-14"), (102, "2026-09-13"),
+                       (103, "2026-09-12"))},
+        details={t: make_detail(t) for t in (101, 102, 103)},
+    )
+    Collector(client=fc, posts=posts, jobs=jobs).run(  # type: ignore[arg-type]
+        from_date="2026-09-12", to_date="2026-09-14")
+    assert {t: posts.get(t).post_date for t in (101, 102, 103)} == {
+        101: "2026-09-14", 102: "2026-09-13", 103: "2026-09-12"}
