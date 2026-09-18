@@ -19,11 +19,14 @@
    * @param {string} code
    * @param {string} message
    */
-  function ApiError(status, code, message) {
+  function ApiError(status, code, message, detail) {
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
     this.message = message;
+    // ★ 保留后端附带的额外字段（如 TG 限流的 retry_after）。
+    //   丢掉它们会让前端只能干巴巴说「失败了」，用户不知道等多久。
+    this.detail = detail || null;
   }
   ApiError.prototype = Object.create(Error.prototype);
   ApiError.prototype.constructor = ApiError;
@@ -71,7 +74,8 @@
         throw new ApiError(
           res.status,
           err.code || 'http_' + res.status,
-          err.message || ('请求失败（HTTP ' + res.status + '）')
+          err.message || ('请求失败（HTTP ' + res.status + '）'),
+          err
         );
       });
     }).catch(function (e) {
@@ -122,6 +126,18 @@
 
     deletePost: function (tid) {
       return request('DELETE', '/api/posts/' + tid);
+    },
+
+    // TG 转发（T-1/T-2）。★ 不是文件下载——是把 ed2k 发到 Bot，
+    // 由 Bot 侧的 aria2/qBittorrent 接手。
+    forward: function (tid) {
+      return request('POST', '/api/posts/' + tid + '/forward');
+    },
+    forwardDay: function (date) {
+      return request('POST', '/api/archive/forward?date=' + encodeURIComponent(date));
+    },
+    testTelegram: function () {
+      return request('POST', '/api/settings/test/telegram');
     }
   };
 

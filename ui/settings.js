@@ -193,6 +193,53 @@
     save(btn.dataset.save, btn);
   });
 
+  /* ---------- 测试连接 ---------- */
+
+  /*
+   * 发一条测试消息到 Telegram。
+   *
+   * ★ 必须先保存再测：后端每次都从**数据库**读凭据，而用户刚输入的值
+   *   还在 DOM 里。不先保存的话，测的是**旧凭据**——用户改了错 token、
+   *   点测试、收到「测试成功」（实际用的是旧的好 token），然后一头雾水。
+   *   这条路径就是「先保存，再测」的强制顺序。
+   */
+  function testTg(btn) {
+    btn.disabled = true;
+    setState('tg', '正在发送测试消息…');
+
+    var saved = collect('tg');
+    var isPlaceholder = saved.token === PLACEHOLDER;
+
+    // 没改 token（还是占位符）就不必重存，直接测已有配置
+    var prep = isPlaceholder
+      ? Promise.resolve(null)
+      : window.api.saveSettings('tg', saved);
+
+    prep.then(function () {
+      return window.api.testTelegram();
+    }).then(function (res) {
+      btn.disabled = false;
+      if (res && res.ok) {
+        setState('tg', '测试成功，请查看 Telegram', 'ok');
+        toast('测试消息已发送，请查看 Telegram', 'ok', { duration: 3600 });
+      } else {
+        var detail = (res && res.detail) || '未知原因';
+        setState('tg', detail, 'err');
+        toast('测试失败：' + detail, 'err', { duration: 6000 });
+      }
+    }).catch(function (e) {
+      btn.disabled = false;
+      setState('tg', e.message, 'err');
+      toast('测试失败：' + e.message, 'err', { duration: 6000 });
+    });
+  }
+
+  modal.addEventListener('click', function (e) {
+    var btn = e.target.closest('[data-test]');
+    if (!btn) return;
+    if (btn.dataset.test === 'tg') testTg(btn);
+  });
+
   /* ---------- 拦截 app.js 的方向键翻页 ---------- */
 
   // app.js 把 ←/→ 翻页监听在 document 冒泡阶段，弹窗打开时必须拦住。

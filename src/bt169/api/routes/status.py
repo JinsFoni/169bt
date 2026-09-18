@@ -13,8 +13,10 @@ from typing import Any
 from fastapi import APIRouter, Depends, Request
 
 from bt169 import __version__
+from bt169.config import section_key
 from bt169.repo.collect import CollectRepo, last_run_stats
 from bt169.repo.posts import PostRepo
+from bt169.repo.settings import SettingsRepo
 from bt169.source.session import RENEW_BEFORE_DAYS, SessionStore
 
 router = APIRouter(prefix="/api", tags=["status"])
@@ -36,6 +38,7 @@ def status(
     db = request.app.state.db
     posts = PostRepo(db)
     jobs = CollectRepo(db)
+    settings = SettingsRepo(db, request.app.state.box)
 
     session = store.load()
     active_job = jobs.active()
@@ -75,5 +78,22 @@ def status(
             "total": sum(counts.values()),
             "by_status": counts,
         },
+        # ---- Telegram（需求 T-4：未配置时前端禁用「下载」按钮）
+        #
+        # ★ 只回布尔值，**绝不回传 token/chat_id**——哪怕脱敏后的长度也不给。
+        #   这个接口不经过设置面板的脱敏逻辑，得自己守住。
+        "telegram": {
+            "configured": _tg_configured(settings),
+        },
         "last_error": None,
     }
+
+
+def _tg_configured(settings: SettingsRepo) -> bool:
+    """Bot Token 与 Chat ID 是否都已配置。
+
+    两个都要有：只配了 Token 而没有 Chat ID 时发不出去，按钮该保持禁用。
+    """
+    token = (settings.get(section_key("tg", "token")) or "").strip()
+    chat_id = (settings.get(section_key("tg", "chat_id")) or "").strip()
+    return bool(token and chat_id)

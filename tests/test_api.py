@@ -64,6 +64,7 @@ def test_posts_contract_fields(client, seed):
     assert set(p) == {
         "tid", "title", "code", "actress", "release_date", "size",
         "cover", "detail", "ed2k", "post_date", "status", "emby_in_library",
+        "tg_sent_at",          # T-7：已转发状态
     }
 
 

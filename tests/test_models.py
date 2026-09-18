@@ -76,6 +76,8 @@ def test_dto_exact_key_set():
     assert set(data) == {
         "tid", "title", "code", "actress", "release_date", "size",
         "cover", "detail", "ed2k", "post_date", "status", "emby_in_library",
+        # T-7：前端靠它把已转发的卡片显示为「已发」
+        "tg_sent_at",
     }
 
 

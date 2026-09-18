@@ -254,8 +254,12 @@ def test_status_endpoint_shape(client):
     assert r.status_code == 200
     body = r.json()
     assert set(body) == {
-        "version", "session", "collector", "collect", "library", "last_error"
+        "version", "session", "collector", "collect", "library",
+        "telegram",            # T-4：前端据此禁用「下载」按钮
+        "last_error",
     }
+    # ★ 只回布尔值——绝不能把 token/chat_id 漏进这个未脱敏的接口
+    assert body["telegram"] == {"configured": False}
     assert body["session"]["valid"] is False
     assert body["session"]["relogin_state"] == "ok"
     assert body["collect"]["running"] is False
@@ -401,3 +405,64 @@ def test_real_collect_endpoint_does_not_500(db, box, tmp_path, monkeypatch):
         r = c.post("/api/collect",
                    json={"from_date": "2026-09-14", "to_date": "2026-09-14"})
     assert r.status_code == 202, r.text
+
+
+def test_status_telegram_configured_when_both_set(client, db, box):
+    """T-4：Token + Chat ID 都填了才算配置完成。"""
+    from bt169 import config
+    from bt169.repo.settings import SettingsRepo
+
+    sr = SettingsRepo(db, box)
+    sr.put(config.section_key("tg", "token"), "123:ABC")
+    sr.put(config.section_key("tg", "chat_id"), "-100200")
+
+    body = client.get("/api/status").json()
+    assert body["telegram"]["configured"] is True
+
+
+def test_status_telegram_needs_both_fields(client, db, box):
+    """★ 只填 Token 没填 Chat ID → 仍未配置。
+
+    发消息需要 chat_id，只配一半时按钮必须保持禁用——否则用户点了
+    只会拿到一个 400，比一开始就禁用更困惑。
+    """
+    from bt169 import config
+    from bt169.repo.settings import SettingsRepo
+
+    sr = SettingsRepo(db, box)
+    sr.put(config.section_key("tg", "token"), "123:ABC")
+
+    body = client.get("/api/status").json()
+    assert body["telegram"]["configured"] is False
+
+
+def test_status_telegram_whitespace_token_is_not_configured(client, db, box):
+    """★ 全空白的值不算配置——否则按钮启用、点击必失败。"""
+    from bt169 import config
+    from bt169.repo.settings import SettingsRepo
+
+    sr = SettingsRepo(db, box)
+    sr.put(config.section_key("tg", "token"), "   ")
+    sr.put(config.section_key("tg", "chat_id"), "  ")
+
+    body = client.get("/api/status").json()
+    assert body["telegram"]["configured"] is False
+
+
+def test_status_never_leaks_telegram_credentials(client, db, box):
+    """★ /api/status **不经过**设置面板的脱敏逻辑，必须自己守住。
+
+    这是最容易漏的地方：给前端加个字段顺手把 token 也塞进去，
+    而 /api/status 是免认证的……那就是把凭据公开了。
+    """
+    from bt169 import config
+    from bt169.repo.settings import SettingsRepo
+
+    sr = SettingsRepo(db, box)
+    sr.put(config.section_key("tg", "token"), "999999:SECRET-TOKEN-XYZ")
+    sr.put(config.section_key("tg", "chat_id"), "-100200")
+
+    raw = client.get("/api/status").text
+    assert "SECRET-TOKEN-XYZ" not in raw, "token 泄漏到 /api/status！"
+    assert "999999" not in raw, "token 片段泄漏！"
+    assert "-100200" not in raw, "chat_id 泄漏！"

@@ -92,6 +92,9 @@ class PostDTO:
     post_date: str
     status: str
     emby_in_library: bool
+    #: TG 转发时间（T-7）。★ 前端用它把按钮显示为「已发」——
+    #: 不返回的话用户看不出哪条已经转发过，会重复点。
+    tg_sent_at: str | None = None
 
     @classmethod
     def from_post(cls, post: Post, *, emby_in_library: bool = False) -> PostDTO:
@@ -117,6 +120,7 @@ class PostDTO:
             post_date=post.post_date,
             status=post.status,
             emby_in_library=emby_in_library,
+            tg_sent_at=post.tg_sent_at,
         )
 
     def to_dict(self) -> dict[str, Any]:

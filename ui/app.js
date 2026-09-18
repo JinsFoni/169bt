@@ -26,6 +26,7 @@
   var prevDay     = $('prevDay');
   var nextDay     = $('nextDay');
   var copyDay     = $('copyDay');
+  var dlDay       = $('dlDay');
   var lightbox    = $('lightbox');
   var lightboxBody= $('lightboxBody');
   var lightboxClose = $('lightboxClose');
@@ -34,6 +35,11 @@
   var toastStack  = $('toastStack');
 
   var lastFocused = null;
+
+  // TG 是否已配置（需求 T-4）。来自 /api/status，每次刷新日期时重取。
+  // 未配置时「下载」按钮禁用 + 提示去设置页，而不是发一个注定 400 的请求。
+  var tgConfigured = false;
+  var tgSending = false;
 
   /* ---------- 工具 ---------- */
 
@@ -144,6 +150,21 @@
 
   function countOf(date) { return counts[date] || 0; }
 
+  /*
+   * 取 TG 配置状态（需求 T-4）。
+   *
+   * ★ 失败时**保持当前值不变**，不降为 false：
+   *   /api/status 拉不到（网络抖动、后端重启）不代表用户没配 TG，
+   *   把按钮锁上会让用户莫名其妙——尤其正在批量转发时。
+   *   宁可多发一个会报错的请求，也不要无缘无故禁用。
+   */
+  function loadStatus() {
+    return window.api.getStatus().then(function (s) {
+      tgConfigured = !!(s && s.telegram && s.telegram.configured);
+      render();
+    }).catch(function () { /* 保持原值 */ });
+  }
+
   function navTo(date) {
     if (!date || date === activeDate) return;
     activeDate = date;
@@ -223,9 +244,15 @@
               '<svg viewBox="0 0 20 20"><path d="M7 3.5h7.5A1.5 1.5 0 0 1 16 5v7.5M4 6.5h7.5A1.5 1.5 0 0 1 13 8v7.5A1.5 1.5 0 0 1 11.5 17H4a1.5 1.5 0 0 1-1.5-1.5V8A1.5 1.5 0 0 1 4 6.5Z"/></svg>' +
               '复制</button>' +
             '<button class="act act-dl" type="button" data-act="dl"' +
-              (locked ? ' disabled title="尚未解锁 ED2K 链接"' : ' title="通过 ED2K 客户端下载"') + '>' +
+              (locked
+                ? ' disabled title="尚未解锁 ED2K 链接"'
+                : (p.tg_sent_at
+                    ? ' title="已转发到 Telegram"'
+                    : (tgConfigured
+                        ? ' title="转发到 Telegram，由 Bot 侧下载"'
+                        : ' title="尚未配置 Telegram，请先到设置页填写"'))) + '>' +
               '<svg viewBox="0 0 20 20"><path d="M10 3.5v9m0 0 3.5-3.5M10 12.5 6.5 9M4 16.5h12"/></svg>' +
-              '下载</button>' +
+              (p.tg_sent_at ? '已发' : '下载') + '</button>' +
             '<button class="act act-del" type="button" data-act="del" title="删除这条记录" aria-label="删除">' +
               '<svg viewBox="0 0 20 20"><path d="M4 6.5h12M8.5 6.5V5a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v1.5M6 6.5l.7 8.4a1 1 0 0 0 1 .9h4.6a1 1 0 0 0 1-.9l.7-8.4"/></svg>' +
             '</button>' +
@@ -257,6 +284,21 @@
     copyDay.title = copyable
       ? '复制当日全部 ED2K 链接 · ' + copyable + ' 条'
       : '当日没有可复制的 ED2K 链接';
+
+    /* 顶栏「下载本日」（T-2）。两个独立条件：没链接 / 没配 TG。 */
+    if (tgSending) {
+      dlDay.disabled = true;
+      dlDay.title = '正在转发…';
+    } else if (copyable === 0) {
+      dlDay.disabled = true;
+      dlDay.title = '当日没有可转发的 ED2K 链接';
+    } else if (!tgConfigured) {
+      dlDay.disabled = true;
+      dlDay.title = '尚未配置 Telegram，请先到设置页填写 Bot Token 与 Chat ID';
+    } else {
+      dlDay.disabled = false;
+      dlDay.title = '转发当日全部 ED2K 链接到 Telegram · ' + copyable + ' 条';
+    }
 
     /* 卡片 */
     if (loading) {
@@ -409,13 +451,87 @@
       toast(p.code + ' 尚未解锁 ED2K 链接', 'err');
       return;
     }
-    // 交给系统注册的 ED2K 客户端（eMule / aMule / easyMule 等）处理
-    var a = document.createElement('a');
-    a.href = p.ed2k;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    toast('已提交下载 ' + p.code, 'ok', { duration: 2200 });
+    if (!tgConfigured) {
+      toast('尚未配置 Telegram，请先到设置页填写 Bot Token 与 Chat ID', 'err',
+            { duration: 4000 });
+      return;
+    }
+    if (tgSending) return;
+    tgSending = true;
+
+    api.forward(p.tid).then(function () {
+      toast('已转发 ' + p.code + ' 到 Telegram', 'ok', { duration: 2400 });
+      p.tg_sent_at = new Date().toISOString();
+      render();
+    }).catch(function (e) {
+      toast(tgMessage(e, p.code), 'err', { duration: 4000 });
+    }).then(function () {
+      tgSending = false;
+    });
+  }
+
+  /**
+   * 把 TG 错误翻译成用户看得懂的一句话。
+   *
+   * ★ 后端返回的 code 是给程序看的，message 是给用户看的——直接用 message
+   *   就够了。特殊分支只处理**需要补充信息**的两种情况：
+   *   - 已转发过：不是错误，是「不必重复操作」，语气要温和
+   *   - 限流：必须告诉用户等多久，message 里带的是秒数
+   */
+  function tgMessage(e, code) {
+    if (e && e.code === 'tg_already_sent') {
+      return code + ' 之前已转发过，无需重复发送';
+    }
+    if (e && e.code === 'tg_rate_limited') {
+      var wait = e.detail && e.detail.retry_after;
+      return 'Telegram 限流' + (wait ? '，请等待 ' + wait + ' 秒后重试' : '，请稍后重试');
+    }
+    if (e && e.code === 'tg_not_configured') {
+      tgConfigured = false;
+      render();
+      return '尚未配置 Telegram，请先到设置页填写';
+    }
+    return (e && e.message) || '转发失败';
+  }
+
+  /** 顶栏「下载本日」——批量转发当日全部 ed2k（需求 T-2）。 */
+  function downloadDayAll() {
+    var links = posts.filter(function (p) { return p.ed2k; });
+    if (!links.length) {
+      toast('这一天没有可转发的 ED2K 链接', 'err');
+      return;
+    }
+    if (!tgConfigured) {
+      toast('尚未配置 Telegram，请先到设置页填写 Bot Token 与 Chat ID', 'err',
+            { duration: 4000 });
+      return;
+    }
+    if (tgSending) return;
+
+    // ★ 后端串行发送、每条间隔 ≥3 秒（TG 限流），十几帖要几十秒。
+    //   按钮必须进入忙碌态，否则用户会以为没反应而反复点击。
+    tgSending = true;
+    dlDay.disabled = true;
+    var n = links.length;
+    toast('正在转发 ' + n + ' 条到 Telegram…', 'ok', { duration: 60000 });
+
+    api.forwardDay(activeDate).then(function (r) {
+      var parts = [];
+      if (r.sent)    parts.push('成功 ' + r.sent);
+      if (r.skipped) parts.push('已发过 ' + r.skipped);
+      if (r.failed)  parts.push('失败 ' + r.failed);
+      var kind = r.failed ? 'err' : 'ok';
+      toast('转发完成：' + parts.join('，'), kind, { duration: 5000 });
+      if (r.failed && r.errors && r.errors.length) {
+        console.warn('转发失败明细', r.errors);
+      }
+      return refresh();
+    }).catch(function (e) {
+      toast(tgMessage(e, '当日'), 'err', { duration: 4500 });
+    }).then(function () {
+      tgSending = false;
+      render();
+    });
   }
 
   function copyDayAll() {
@@ -488,6 +604,7 @@
   prevDay.addEventListener('click', function () { step(-1); });
   nextDay.addEventListener('click', function () { step(1); });
   copyDay.addEventListener('click', copyDayAll);
+  dlDay.addEventListener('click', downloadDayAll);
   lightboxClose.addEventListener('click', closeLightbox);
 
   lightbox.addEventListener('click', function (e) {
@@ -509,6 +626,7 @@
   /* 从后端拉日期列表，默认停在最新一天 */
   function boot() {
     return loadDates().then(function () {
+      loadStatus();                        // 不阻塞首屏：TG 状态晚一点到没关系
       activeDate = dateList[dateList.length - 1] || null;
       if (!activeDate) { render(); return; }
       return loadPosts(activeDate);
@@ -521,6 +639,7 @@
 
   /* 采集完成后由 collect.js 调用，刷新日期列表 */
   window.reloadDates = function () {
+    loadStatus();
     return loadDates().then(function () {
       if (!activeDate) activeDate = dateList[dateList.length - 1] || null;
       if (activeDate) return loadPosts(activeDate);

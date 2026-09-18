@@ -53,6 +53,7 @@ def create_app(
         posts,
         settings,
         status,
+        telegram,
     )
 
     # 门禁中间件包裹整个应用（与路由注册顺序无关）；放在 include_router
@@ -65,6 +66,7 @@ def create_app(
     app.include_router(settings.router)
     app.include_router(collect.router)
     app.include_router(status.router)
+    app.include_router(telegram.router)
 
     # 静态资源必须**最后**挂载：Starlette 按注册顺序匹配，
     # 挂在 "/" 的 StaticFiles 会吞掉之后注册的所有路由。
