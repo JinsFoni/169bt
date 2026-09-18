@@ -85,12 +85,18 @@ class PostRepo:
         ed2k: str | None,
         post_date: str,
         status: str,
+        cover_local: str | None = None,
+        detail_local: str | None = None,
     ) -> None:
         """写入一条采集结果。
 
         ``ON CONFLICT`` 只在**同一 tid 被重新采集**时触发（例如上一轮
         ``failed`` 被用户重跑），此时**保留**已有的 emby/tg 派生状态——
         那些字段的更新由各自的流程负责，不该被采集覆盖成 NULL。
+
+        ★ 本地图路径（``cover_local``/``detail_local``）用 ``COALESCE``
+        保留旧值：图床可能临时抽风导致本轮没下到图，那时**不该**把上轮
+        已下好的本地图路径抹掉（否则前端会从本地图退回外链）。
         """
         if status not in VALID_STATUSES:
             raise ValueError(f"非法状态：{status}")
@@ -98,21 +104,47 @@ class PostRepo:
         with self._db.write() as conn:
             conn.execute(
                 "INSERT INTO posts(tid, title, code, actress, release_date, size,"
-                " cover_img, detail_img, ed2k, post_date, status, retry_count,"
-                " created_at, updated_at)"
-                " VALUES(?,?,?,?,?,?,?,?,?,?,?,0,?,?)"
+                " cover_img, detail_img, cover_local, detail_local, ed2k,"
+                " post_date, status, retry_count, created_at, updated_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?)"
                 " ON CONFLICT(tid) DO UPDATE SET"
                 " title=excluded.title, code=excluded.code,"
                 " actress=excluded.actress, release_date=excluded.release_date,"
                 " size=excluded.size, cover_img=excluded.cover_img,"
-                " detail_img=excluded.detail_img, ed2k=excluded.ed2k,"
+                " detail_img=excluded.detail_img,"
+                " cover_local=COALESCE(excluded.cover_local, posts.cover_local),"
+                " detail_local=COALESCE(excluded.detail_local, posts.detail_local),"
+                " ed2k=excluded.ed2k,"
                 " post_date=excluded.post_date, status=excluded.status,"
                 " last_error=NULL, next_retry_at=NULL, updated_at=excluded.updated_at",
                 (
                     tid, title, code, actress, release_date, size, cover_img,
-                    detail_img, ed2k, post_date, status, now, now,
+                    detail_img, cover_local, detail_local, ed2k, post_date,
+                    status, now, now,
                 ),
             )
+
+    def references_image(self, url: str) -> bool:
+        """是否还有别的帖子引用这张图（删除联动做引用计数）。
+
+        依据**源 URL**：``ImageCache.key = sha1(源 URL)``，同 key 必然来自
+        同 URL，所以按 URL 计数是精确的（不需要反解本地路径）。
+        """
+        row = self._db.read().execute(
+            "SELECT COUNT(*) AS c FROM posts"
+            " WHERE cover_img=? OR detail_img=?",
+            (url, url),
+        ).fetchone()
+        return bool(row["c"])
+
+    def missing_local_images(self) -> list[int]:
+        """有图但未本地化的 tid（供 ``169bt doctor`` 统计覆盖率）。"""
+        rows = self._db.read().execute(
+            "SELECT tid FROM posts"
+            " WHERE (cover_img IS NOT NULL AND cover_local IS NULL)"
+            "    OR (detail_img IS NOT NULL AND detail_local IS NULL)"
+        ).fetchall()
+        return [r["tid"] for r in rows]
 
     def count_by_status(self) -> dict[str, int]:
         rows = self._db.read().execute(

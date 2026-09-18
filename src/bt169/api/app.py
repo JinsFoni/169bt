@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from bt169 import __version__
-from bt169.config import UI_DIR
+from bt169.config import IMAGE_DIR, UI_DIR
 from bt169.crypto import SecretBox
 from bt169.db import Database
 
@@ -22,6 +22,7 @@ def create_app(
     *,
     box: SecretBox,
     ui_dir: Path | None = UI_DIR,
+    image_dir: Path | None = IMAGE_DIR,
 ) -> FastAPI:
     """装配应用。
 
@@ -29,6 +30,7 @@ def create_app(
         db: 已迁移的数据库。
         box: 设置密钥字段的加解密器。
         ui_dir: 前端目录；``None`` 表示不挂载静态资源（API 单测用）。
+        image_dir: 本地化图片目录（W-15）；``None`` 表示不挂载 ``/img``。
     """
     app = FastAPI(
         title="169bt 归档台",
@@ -39,6 +41,7 @@ def create_app(
     )
     app.state.db = db
     app.state.box = box
+    app.state.image_dir = image_dir
 
     _install_error_handler(app)
 
@@ -52,6 +55,15 @@ def create_app(
 
     # 静态资源必须**最后**挂载：Starlette 按注册顺序匹配，
     # 挂在 "/" 的 StaticFiles 会吞掉之后注册的所有路由。
+    #
+    # ``/img`` 是本地化图片（W-15）。文件名含内容哈希，所以可以
+    # 永久缓存（``immutable``）—— 换图必然换文件名。
+    if image_dir is not None and Path(image_dir).is_dir():
+        app.mount(
+            "/img",
+            StaticFiles(directory=str(image_dir)),
+            name="images",
+        )
     if ui_dir is not None and Path(ui_dir).is_dir():
         app.mount("/", StaticFiles(directory=str(ui_dir), html=True), name="ui")
 

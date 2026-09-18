@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from bt169 import config
 from bt169.collector import CollectError, Collector, CollectRunner, ValidateError
+from bt169.collector.imagecache import ImageCache
 from bt169.repo.collect import CollectJob, CollectRepo
 from bt169.repo.posts import PostRepo
 from bt169.source.forum import ForumClient
@@ -69,6 +70,7 @@ def _build_runner(request: Request) -> CollectRunner:
     cookies = session.cookies if session and session.valid else None
 
     client = ForumClient(cookies=cookies)
+    image_dir = getattr(request.app.state, "image_dir", None)
     collector = Collector(
         client=client,
         posts=PostRepo(db),
@@ -76,6 +78,9 @@ def _build_runner(request: Request) -> CollectRunner:
         # ★ 只有拿着有效会话才注入感谢：匿名会话下感谢必然失败，
         #   不注入就自然停在 pending，不会白跑一轮限速请求。
         thanks=ThanksClient(client=client) if cookies else None,
+        # ★ 图片本地化（W-15）。采集是串行限速的，转码 ~100 ms 可忽略；
+        #   预生成后 /img 直接静态分发，零开销。
+        images=ImageCache(image_dir) if image_dir else None,
     )
     runner = CollectRunner(collector, CollectRepo(db))
     request.app.state.collect_runner = runner

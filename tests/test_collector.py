@@ -86,7 +86,8 @@ def make_detail(tid: int, *, ed2k: bool = True, locked: bool = False) -> ThreadD
     return ThreadDetail(
         tid=tid, title=f"标题 {tid}", code=f"ABC-{tid}",
         actress="某人", release_date="2026-09-17", size="7GB",
-        cover_img=f"https://img.example/{tid}.jpg", detail_img=None,
+        cover_img=f"https://img.example/{tid}.jpg",
+        detail_img=f"https://img.example/{tid}-d.jpg",
         ed2k=f"ed2k://|file|{tid}.mkv|1|AB|/" if ed2k else None,
         locked=locked,
         # 真实的 parse_thread_detail 一定会带上来源 HTML（感谢流程要复用）
@@ -562,3 +563,106 @@ def test_thanks_login_required_aborts_job(env):
 
     assert jobs.recent()[0].status == JOB_FAILED
     assert "会话失效" in jobs.recent()[0].message
+
+
+# ------------------------------------------------------------ 图片本地化（W-15）
+
+
+class FakeImages:
+    """假图片缓存。"""
+
+    def __init__(self, *, fail: set[str] | None = None) -> None:
+        self.fail = fail or set()
+        self.calls: list[int] = []
+
+    def ensure_post(self, detail):
+        from bt169.collector.imagecache import CachedImage, ImageError
+
+        self.calls.append(detail.tid)
+        out = {}
+        for field in ("cover", "detail"):
+            url = getattr(detail, f"{field}_img", None)
+            if not url or field in self.fail:
+                continue
+            out[field] = CachedImage(
+                url=url, key="ab" * 8,
+                variants={600: f"/img/ab/{field}-600.webp"},
+                bytes_in=100, bytes_out=10,
+            )
+        return out
+
+
+def test_images_localized_on_collect(env):
+    db, posts, jobs = env
+    fc = FakeForum(pages={1: rows((101, "2026-09-14"))},
+                   details={101: make_detail(101)})
+    images = FakeImages()
+    c = Collector(client=fc, posts=posts, jobs=jobs, images=images)  # type: ignore[arg-type]
+    c.run(from_date="2026-09-14", to_date="2026-09-14")
+
+    p = posts.get(101)
+    assert images.calls == [101]
+    assert p.cover_local == "/img/ab/cover-600.webp"
+    assert p.detail_local == "/img/ab/detail-600.webp"
+
+
+def test_image_failure_does_not_fail_collect(env):
+    """★ 图片失败不该让整帖采集失败（ed2k/番号比图重要）。"""
+    db, posts, jobs = env
+    fc = FakeForum(pages={1: rows((101, "2026-09-14"))},
+                   details={101: make_detail(101)})
+    images = FakeImages(fail={"cover", "detail"})
+    c = Collector(client=fc, posts=posts, jobs=jobs, images=images)  # type: ignore[arg-type]
+    result = c.run(from_date="2026-09-14", to_date="2026-09-14")
+
+    assert result.failed == 0
+    assert result.collected == 1
+    p = posts.get(101)
+    assert p.cover_local is None
+    assert p.ed2k is not None, "ed2k 必须保留"
+    assert p.code == "ABC-101"
+
+
+def test_local_path_survives_recollect_without_image(env):
+    """★ 重采时图床抽风 → 不能把上轮已下好的本地图路径抹掉。"""
+    db, posts, jobs = env
+    fc = FakeForum(pages={1: rows((101, "2026-09-14"))},
+                   details={101: make_detail(101)})
+    Collector(client=fc, posts=posts, jobs=jobs, images=FakeImages()).run(  # type: ignore[arg-type]
+        from_date="2026-09-14", to_date="2026-09-14")
+    assert posts.get(101).cover_local is not None
+
+    posts.delete(101)                       # 用户删掉后重采
+    Collector(client=fc, posts=posts, jobs=jobs,
+              images=FakeImages(fail={"cover", "detail"})).run(  # type: ignore[arg-type]
+        from_date="2026-09-14", to_date="2026-09-14")
+    # 行被删了，所以这里是全新插入 → 本地路径为 None（COALESCE 只对 UPSERT 生效）
+    assert posts.get(101) is not None
+
+
+def test_local_path_preserved_on_upsert(env):
+    """同一 tid 二次 upsert 且本轮无图 → 保留旧本地路径（COALESCE）。"""
+    db, posts, jobs = env
+    posts.upsert_collected(
+        tid=101, title="t", code=None, actress=None, release_date=None,
+        size=None, cover_img="https://img/c.jpg", detail_img=None,
+        ed2k="ed2k://|file|a|1|AB|/", post_date="2026-09-14", status="done",
+        cover_local="/img/ab/old-600.webp",
+    )
+    posts.upsert_collected(
+        tid=101, title="t2", code=None, actress=None, release_date=None,
+        size=None, cover_img="https://img/c.jpg", detail_img=None,
+        ed2k="ed2k://|file|a|1|AB|/", post_date="2026-09-14", status="done",
+        cover_local=None,
+    )
+    assert posts.get(101).cover_local == "/img/ab/old-600.webp"
+
+
+def test_no_images_injected_is_fine(env):
+    db, posts, jobs = env
+    fc = FakeForum(pages={1: rows((101, "2026-09-14"))},
+                   details={101: make_detail(101)})
+    c = Collector(client=fc, posts=posts, jobs=jobs)  # type: ignore[arg-type]
+    result = c.run(from_date="2026-09-14", to_date="2026-09-14")
+    assert result.collected == 1
+    assert posts.get(101).cover_local is None

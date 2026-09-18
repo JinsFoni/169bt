@@ -33,6 +33,8 @@ class Post:
     size: str | None
     cover_img: str | None
     detail_img: str | None
+    cover_local: str | None
+    detail_local: str | None
     ed2k: str | None
     post_date: str
     post_time: str | None
@@ -81,6 +83,15 @@ class PostDTO:
 
     @classmethod
     def from_post(cls, post: Post, *, emby_in_library: bool = False) -> PostDTO:
+        """构造 DTO。
+
+        ``cover``/``detail`` **优先给本地化路径**（W-15），本地没有时
+        回退到图床源 URL。这样：
+
+        - 前端无需任何改动（字段名与语义不变，ADR-11/ADR-16）
+        - 图床挂掉不影响已本地化的图
+        - 尚未本地化（或本地化失败）的帖仍能显示，只是走外链
+        """
         return cls(
             tid=post.tid,
             title=post.title,
@@ -88,8 +99,8 @@ class PostDTO:
             actress=post.actress,
             release_date=post.release_date,
             size=post.size,
-            cover=post.cover_img,
-            detail=post.detail_img,
+            cover=post.cover_local or post.cover_img,
+            detail=post.detail_local or post.detail_img,
             ed2k=post.ed2k,
             post_date=post.post_date,
             status=post.status,

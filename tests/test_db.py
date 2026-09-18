@@ -123,3 +123,78 @@ def test_reader_returns_same_conn_within_thread(db):
 def test_close_is_idempotent(db):
     db.close()
     db.close()
+
+
+# ------------------------------------------------------------ 迁移链（逐版本）
+
+
+def test_migration_chain_preserves_data(tmp_path):
+    """★ 从 v1 逐级升到最新，数据必须一路保留。
+
+    这类测试是**必需的**：真实库已有数据，迁移写错（例如
+    ``ALTER TABLE`` 失败、或漏写 ``user_version``）会在生产库里
+    才暴露。这里把每一级都真实走一遍。
+    """
+    from bt169.db import _MIGRATIONS_DIR
+
+    path = tmp_path / "chain.db"
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    scripts = sorted(_MIGRATIONS_DIR.glob("*.sql"))
+    assert len(scripts) >= 3
+
+    # 只应用第一级，然后塞一行
+    conn.executescript(scripts[0].read_text(encoding="utf-8"))
+    conn.execute("PRAGMA user_version=1")
+    conn.execute(
+        "INSERT INTO posts(tid,title,post_date,status,retry_count,"
+        " created_at,updated_at) VALUES(1,'老帖','2026-09-14','done',0,'t','t')"
+    )
+    conn.commit()
+    conn.close()
+
+    # 逐级升到最新
+    d = Database(path)
+    try:
+        assert d.migrate() == SCHEMA_VERSION
+        row = d.read().execute("SELECT * FROM posts WHERE tid=1").fetchone()
+        assert row["title"] == "老帖"
+        assert row["cover_local"] is None      # 新列默认为 NULL
+        assert row["detail_local"] is None
+    finally:
+        d.close()
+
+
+def test_migration_versions_are_unique_and_contiguous():
+    """★ 迁移文件版本号必须唯一且从 1 连续。
+
+    两个真实故障模式：
+
+    1. **版本号重复**（``002_a.sql`` + ``002_b.sql``）：``migrate()`` 用
+       ``version <= current`` 跳过，所以第二个文件会被**永久跳过**，
+       而且不报错——schema 静默缺一块。
+    2. **版本号不连续**：``_user_version`` 会跳号，``SCHEMA_VERSION``
+       与实际不符，测试断言失去意义。
+    """
+    versions = [v for v, _ in Database._discover()]
+    assert versions == list(range(1, len(versions) + 1)), (
+        f"迁移版本号必须唯一且从 1 连续，实际 {versions}"
+    )
+    assert versions[-1] == SCHEMA_VERSION, (
+        f"SCHEMA_VERSION={SCHEMA_VERSION} 与最后一个迁移文件 {versions[-1]} 不符"
+    )
+
+
+def test_alter_table_migrations_are_not_reapplied(tmp_path):
+    """★ 回归：``ALTER TABLE ADD COLUMN`` 重复执行会报 duplicate column。
+
+    这正是 ``test_every_migration_bumps_version`` 要防的故障——
+    这里直接验证「连跑三次 migrate 不崩」。
+    """
+    d = Database(tmp_path / "thrice.db")
+    try:
+        assert d.migrate() == SCHEMA_VERSION
+        assert d.migrate() == SCHEMA_VERSION
+        assert d.migrate() == SCHEMA_VERSION
+    finally:
+        d.close()

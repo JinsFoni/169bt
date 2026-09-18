@@ -33,6 +33,8 @@ from bt169.source.forum import FetchError, ForumClient, LoginRequired
 from bt169.source.parse import parse_thread_detail
 from bt169.source.thanks import ThanksClient, ThanksError
 
+from bt169.collector.imagecache import CARD_WIDTH, ImageCache
+
 __all__ = [
     "Collector",
     "CollectResult",
@@ -105,6 +107,7 @@ class Collector:
         posts: PostRepo,
         jobs: CollectRepo,
         thanks: ThanksClient | None = None,
+        images: ImageCache | None = None,
         on_login_required=None,
     ) -> None:
         self._c = client
@@ -113,6 +116,8 @@ class Collector:
         # ★ 未注入时不自动建：匿名会话下感谢必然失败，不如显式报错。
         #   测试与匿名采集传 None，需要解锁的场景由 API 层注入。
         self._thanks = thanks
+        # ★ 未注入则不做本地化（测试、离线环境）
+        self._images = images
         self._on_login_required = on_login_required
 
     # ---------------------------------------------------------------- 主流程
@@ -291,7 +296,23 @@ class Collector:
             ed2k=detail.ed2k,
             post_date=post_date,
             status=status,
+            **self._localize(detail),
         )
+
+    def _localize(self, detail) -> dict[str, str | None]:  # type: ignore[no-untyped-def]
+        """把封面图/详情图本地化，返回要写入的本地路径。
+
+        **不抛异常**：图片失败不该让整帖采集失败——番号、演员、ed2k
+        比图重要得多。失败时返回空字典，那些列保持原值（见
+        ``upsert_collected`` 的 COALESCE 语义）。
+        """
+        if self._images is None:
+            return {}
+        cached = self._images.ensure_post(detail)
+        return {
+            f"{field}_local": img.variants.get(CARD_WIDTH)
+            for field, img in cached.items()
+        }
 
     # ---------------------------------------------------------------- 汇总
 

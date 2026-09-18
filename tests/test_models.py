@@ -22,12 +22,16 @@ def row(**over):
     """用**真实迁移的 schema** 造一行，避免手写列名漂移。
 
     用 ``:memory:`` 而不是临时文件：快，且不泄漏临时目录。
+
+    ★ 必须跑**全部**迁移（而不是只读 001）：否则新增列不会被发现，
+    测试会在 schema 演进后悄悄失去意义。
     """
     from bt169.db import _MIGRATIONS_DIR
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    conn.executescript((_MIGRATIONS_DIR / "001_init.sql").read_text(encoding="utf-8"))
+    for sql_path in sorted(_MIGRATIONS_DIR.glob("*.sql")):
+        conn.executescript(sql_path.read_text(encoding="utf-8"))
 
     data = {**BASE, **over}
     cols = ", ".join(data)
@@ -99,3 +103,37 @@ def test_post_is_frozen():
     p = Post.from_row(row())
     with pytest.raises(Exception):
         p.tid = 1  # type: ignore[misc]
+
+
+# ------------------------------------------------------------ 图片本地化（W-15）
+
+
+def test_dto_prefers_local_image_paths():
+    """★ 有本地图时给本地路径（图床挂了也不影响显示）。"""
+    p = Post.from_row(row(cover_local="/img/ab/ab3f-600.webp",
+                          detail_local="/img/ab/ab3f-1200.webp"))
+    dto = PostDTO.from_post(p)
+    assert dto.cover == "/img/ab/ab3f-600.webp"
+    assert dto.detail == "/img/ab/ab3f-1200.webp"
+
+
+def test_dto_falls_back_to_source_url():
+    """★ 尚未本地化时回退到图床源 URL（不能因为没本地图就不显示）。"""
+    p = Post.from_row(row())
+    dto = PostDTO.from_post(p)
+    assert dto.cover == "https://img/c.jpg"
+    assert dto.detail == "https://img/d.jpg"
+
+
+def test_dto_local_and_source_are_independent():
+    """只有封面本地化时，详情仍走源 URL。"""
+    p = Post.from_row(row(cover_local="/img/ab/x-600.webp"))
+    dto = PostDTO.from_post(p)
+    assert dto.cover == "/img/ab/x-600.webp"
+    assert dto.detail == "https://img/d.jpg"
+
+
+def test_post_has_local_columns():
+    p = Post.from_row(row())
+    assert p.cover_local is None
+    assert p.detail_local is None
