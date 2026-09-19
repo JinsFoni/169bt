@@ -198,3 +198,52 @@ def test_alter_table_migrations_are_not_reapplied(tmp_path):
         assert d.migrate() == SCHEMA_VERSION
     finally:
         d.close()
+
+
+def test_migration_005_strips_size_annotation(tmp_path):
+    """★ 005 洗掉库里 ``7GB@NO Watermark`` 这类脏值。
+
+    站点把「值 + 注解」写成一行（``@`` 分隔），解析层曾把注解一起存进
+    ``size``。解析层已修，但**已经进库的 20 行不会自己变干净**——
+    这个迁移就是来收尾的。
+
+    ★ 幂等：``migrate()`` 跑第二遍不能把 ``7GB`` 再切坏。
+    ★ 不误伤：没有 ``@`` 的行必须原样保留。
+    """
+    import sqlite3
+
+    from bt169.db import _MIGRATIONS_DIR
+
+    path = tmp_path / "size.db"
+    conn = sqlite3.connect(path)
+    conn.executescript((_MIGRATIONS_DIR / "001_init.sql").read_text(encoding="utf-8"))
+    conn.execute("PRAGMA user_version=1")
+    for tid, size in [
+        (1, "7GB@NO Watermark"),
+        (2, "14GB@NO Watermark"),
+        (3, "1天@Please Seed"),
+        (4, "7GB"),          # 本来就干净 → 不能动
+        (5, None),           # NULL → 不能动
+    ]:
+        conn.execute(
+            "INSERT INTO posts(tid,title,size,post_date,status,retry_count,"
+            " created_at,updated_at) VALUES(?,? ,?,'2026-09-14','done',0,'t','t')",
+            (tid, f"帖{tid}", size),
+        )
+    conn.commit()
+    conn.close()
+
+    d = Database(path)
+    try:
+        assert d.migrate() == SCHEMA_VERSION
+        rows = dict(d.read().execute("SELECT tid, size FROM posts").fetchall())
+        assert rows[1] == "7GB"
+        assert rows[2] == "14GB"
+        assert rows[3] == "1天"
+        assert rows[4] == "7GB"
+        assert rows[5] is None
+        # 幂等
+        assert d.migrate() == SCHEMA_VERSION
+        assert dict(d.read().execute("SELECT tid, size FROM posts").fetchall())[1] == "7GB"
+    finally:
+        d.close()

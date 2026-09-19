@@ -13,7 +13,7 @@ from bt169.config import DB_PATH
 __all__ = ["Database", "SCHEMA_VERSION"]
 
 #: 当前 schema 版本。新增迁移文件时递增。
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 

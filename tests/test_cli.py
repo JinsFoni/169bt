@@ -349,3 +349,50 @@ def test_cleanup_sessions_removes_expired(db, box):
     assert cleanup_sessions(db) == 1
     left = db.read().execute("SELECT COUNT(*) FROM panel_sessions").fetchone()[0]
     assert left == 1
+
+
+def _seed_post_with_dirty_size(tmp_path, monkeypatch, size="7GB@NO Watermark"):
+    """塞一行带 @注解 的 size，但把库标成「已是最新」。
+
+    这样 ``migrate()`` 不会替我们洗干净——模拟**迁移之前**就已存在的脏行。
+    """
+    from bt169.db import SCHEMA_VERSION, Database
+
+    db_path = tmp_path / "dirty.db"
+    monkeypatch.setattr("bt169.config.DB_PATH", db_path)
+    monkeypatch.setattr("bt169.config.DATA_DIR", tmp_path)
+    monkeypatch.setattr("bt169.config.IMAGE_DIR", tmp_path / "images")
+
+    db = Database(db_path)
+    db.migrate()
+    with db.write() as conn:
+        conn.execute(
+            "INSERT INTO posts(tid,title,size,post_date,status,retry_count,"
+            " created_at,updated_at) VALUES(1,'帖',?,'2026-09-14','done',0,'t','t')",
+            (size,),
+        )
+        # 迁移已跑过，但数据是「历史遗留」的脏值
+        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+    db.close()
+
+
+def test_doctor_flags_dirty_size(tmp_path, monkeypatch, capsys):
+    """★ size 里残留 @注解 → 必须报 ✗。
+
+    解析层修好之后，**已经在库里的脏行**不会自己变干净。没有这条检查，
+    卡片上会一直显示 ``7GB@NO Watermark``，而没有任何东西提醒你。
+    """
+    _seed_post_with_dirty_size(tmp_path, monkeypatch)
+    rc = main(["doctor"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "size 残留注解" in out
+
+
+def test_doctor_passes_with_clean_size(tmp_path, monkeypatch, capsys):
+    """size 干净时必须 ✓ —— 否则 doctor 永远报警，失去意义。"""
+    _seed_post_with_dirty_size(tmp_path, monkeypatch, size="7GB")
+    rc = main(["doctor"])
+    out = capsys.readouterr().out
+    assert "size 残留注解" not in out or "✓" in out
+    assert rc == 0

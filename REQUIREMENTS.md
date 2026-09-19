@@ -76,7 +76,7 @@ GET https://169bt.com/forum.php?mod=viewthread&tid=<TID>
 | 完整标题 | `<title>` / 正文 `[影片名称]` | `[4K] START-624 配送中NTR…` |
 | **出演者** | 正文 `[出演者]：` | `本庄鈴` |
 | **发布日期**（商品発売日） | 正文 `商品発売日：` | `2026/09/17` |
-| **影片大小** | 正文 `[影片大小]：` | `7GB@NO Watermark` |
+| **影片大小** | 正文 `[影片大小]：`（截掉 `@注解`） | `7GB` |
 | **封面图** | 正文第 1 个 `<img file="…">` | `https://www.imgccc.com/…jpg` |
 | **详情图** | 正文第 2 个 `<img file="…">` | `https://www.imgccc.com/…jpg` |
 | **ed2k 链接** | 感谢后正文 `ed2k://\|file\|…\|/` | `ed2k://\|file\|s169bbs.com@START-624_[4K].mkv\|7515146184\|0B17E9…\|/` |
@@ -236,7 +236,7 @@ CREATE TABLE posts (
   code          TEXT,                  -- 番号，如 START-624
   actress       TEXT,                  -- 出演者
   release_date  TEXT,                  -- 商品発売日 (YYYY-MM-DD)
-  size          TEXT,                  -- 影片大小，如 "7GB@NO Watermark"
+  size          TEXT,                  -- 影片大小，如 "7GB"（站点原文 7GB@NO Watermark）
   cover_img     TEXT,                  -- 封面图 URL
   detail_img    TEXT,                  -- 详情图 URL
   ed2k          TEXT,                  -- ed2k 链接
@@ -387,6 +387,9 @@ GROUP BY post_date ORDER BY post_date DESC;
 ```
 
 ### A.3 实际抓取样本（tid=3986000）
+
+★ 下为**站点原文**。注意 `影片大小` 是 `值@注解` 格式（`@` 后是补充说明，
+不是值的一部分），解析层只保留 `7GB`——入库的是 `7GB`。
 
 ```
 番号      : START-624

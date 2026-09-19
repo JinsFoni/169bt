@@ -265,3 +265,42 @@ def test_detail_cleans_html_entities():
     html = '<td class="t_f">出演者：&nbsp;本庄鈴&nbsp;</td>'
     d = parse_thread_detail(html, 1)
     assert d.actress == "本庄鈴"
+
+
+# ------------------------------------------------------------ 字段值后的 @注解
+
+
+def test_detail_size_strips_annotation():
+    """★ 站点在字段值后追加 ``@注解``，只保留值本身。
+
+    原文是 ``[影片大小]：7GB@NO Watermark``。旧测试只断言
+    ``startswith("7GB")`` —— 注解一起被存进库也照样通过，
+    于是 20 行 ``XGB@NO Watermark`` 就这样进了生产库。
+    """
+    d = parse_thread_detail(load("viewthread_locked.html"), 3986000)
+    assert d.size == "7GB"
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("7GB@NO Watermark", "7GB"),
+    ("14GB@NO Watermark", "14GB"),
+    ("1天@Please Seed", "1天"),
+    ("有码@无水印", "有码"),
+    # 没有注解 → 原样返回
+    ("7GB", "7GB"),
+    # 注解里还有 @ → 只切第一个
+    ("7GB@A@B", "7GB"),
+    # 只有空白 → None（与 _clean 的约定一致）
+    ("   ", None),
+])
+def test_strip_annotation(raw, expected):
+    """``_strip_annotation`` 的直接单元测试。"""
+    from bt169.source.parse import _strip_annotation
+
+    assert _strip_annotation(raw) == expected
+
+
+def test_strip_annotation_none():
+    from bt169.source.parse import _strip_annotation
+
+    assert _strip_annotation(None) is None

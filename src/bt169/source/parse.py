@@ -430,7 +430,7 @@ def parse_thread_detail(html: str, tid: int) -> ThreadDetail:
         code=code,
         actress=_clean(actress),
         release_date=release,
-        size=_clean(size),
+        size=_strip_annotation(size),
         cover_img=imgs[0] if imgs else None,
         detail_img=imgs[1] if len(imgs) > 1 else None,
         ed2k=ed2k,
@@ -472,3 +472,25 @@ def _clean(value: str | None) -> str | None:
     v = value.replace("&nbsp;", " ").replace("&amp;", "&").strip()
     v = re.sub(r"\s+", " ", v)
     return v or None
+
+
+def _strip_annotation(value: str | None) -> str | None:
+    """切掉字段值后的 ``@注解``，只保留值本身。
+
+    站点把「值 + 补充说明」写成一行，用 ``@`` 分隔（实测原文）：
+
+        　[影片大小]：7GB@NO Watermark
+        　[有码无码]：有码@无水印
+        　[種子期限]：1天@Please Seed
+
+    所以 ``7GB`` 是值，``NO Watermark`` 是注解。
+
+    ★ 做成具名函数而不是把 ``@`` 写进正则的字符类：站点的这个格式约定
+      藏在 ``[^@<\r\n]+`` 里没人看得出来，而它已经漏过一次——
+      库里 20 行 ``XGB@NO Watermark`` 就是这么进去的。
+
+    ★ 只切**第一个** ``@``：注解自身还可能带 ``@``（如 ``7GB@A@B``）。
+    """
+    if value is None:
+        return None
+    return _clean(value.split("@", 1)[0])

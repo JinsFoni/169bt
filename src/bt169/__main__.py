@@ -310,6 +310,33 @@ def _image_checks(db) -> list[tuple[str, bool, str, str]]:  # type: ignore[no-un
     return out
 
 
+def _size_checks(db) -> list[tuple[str, bool, str, str]]:  # type: ignore[no-untyped-def]
+    """检查 ``size`` 里是否残留 ``@注解``。
+
+    站点把「值 + 补充说明」写成一行（``7GB@NO Watermark``）。解析层
+    已在 ``_strip_annotation()`` 里修好，但**迁移之前就已存在的脏行**
+    只能靠 ``005_fix_size.sql`` 洗一次。
+
+    没有这条检查，脏值会一直显示在卡片上而无人察觉——修了解析层
+    不等于修了历史数据。
+    """
+    bad = [
+        row[0]
+        for row in db.read().execute(
+            "SELECT tid FROM posts WHERE size LIKE '%@%' ORDER BY tid LIMIT 3"
+        )
+    ]
+    n = db.read().execute(
+        "SELECT COUNT(*) FROM posts WHERE size LIKE '%@%'"
+    ).fetchone()[0]
+    return [(
+        f"size 残留注解 {n} 行",
+        n == 0,
+        f"如 {bad} —— 跑一次 bt169 migrate 即可洗净",
+        "",
+    )]
+
+
 def _emby_checks(db) -> list[tuple[str, bool, str, str]]:  # type: ignore[no-untyped-def]
     """Emby 入库标记状态（E-1~E-7）。
 
@@ -445,6 +472,7 @@ def _cmd_doctor() -> int:
         n = db.read().execute("SELECT COUNT(*) FROM posts").fetchone()[0]
         checks.append((f"帖子总数 {n}", True, "", ""))
         checks.extend(_image_checks(db))
+        checks.extend(_size_checks(db))
         checks.extend(_auth_checks(db))
         checks.extend(_emby_checks(db))
     except Exception as exc:
