@@ -19,7 +19,31 @@
   'use strict';
 
   var overlay, form, input, submit, errorEl;
-  var onUnlock = null;
+  var pending = [];        // 已注册的解锁回调（app.js、collect.js 各自注册）
+  var unlocked = false;    // 已放行？后注册的回调直接跑
+
+  /*
+   * ★ 解锁回调是**多监听者**，不是单槽位。
+   *
+   * app.js 和 collect.js 都要等门禁放行才能取数（否则未登录时就打
+   * 受保护端点 → 401，用户看到的是「坏了」）。如果只存一个回调，
+   * 后注册的会把先注册的顶掉——症状是 app.js 再也不取数，页面永远空白。
+   */
+  function onReady(fn) {
+    if (typeof fn !== 'function') return;
+    if (unlocked) { fn(); return; }
+    pending.push(fn);
+  }
+
+  function release() {
+    if (unlocked) return;
+    unlocked = true;
+    var list = pending;
+    pending = [];
+    list.forEach(function (fn) {
+      try { fn(); } catch (e) { /* 一个回调炸了不能拖死其它 */ }
+    });
+  }
 
   function show() {
     if (!overlay) return;
@@ -75,7 +99,7 @@
     global.api.login(password).then(function () {
       busy(false);
       hide();
-      if (onUnlock) onUnlock();
+      release();
     }).catch(function (e) {
       busy(false);
       // 401 = 密码错；其余（超时/离线）如实转述，别一律说「密码错误」
@@ -89,10 +113,10 @@
 
   /**
    * 启动门禁检查。
-   * @param {function(): void} unlocked 已认证（或门禁未启用）时调用
+   * @param {function(): void} [fn] 已认证（或门禁未启用）时调用
    */
-  function start(unlocked) {
-    onUnlock = unlocked;
+  function start(fn) {
+    onReady(fn);
     overlay = document.getElementById('gate');
     form = document.getElementById('gateForm');
     input = document.getElementById('gatePass');
@@ -104,16 +128,16 @@
     global.api.getAuthMe().then(function (state) {
       if (state && state.authenticated) {
         hide();
-        if (onUnlock) onUnlock();
+        release();
       } else {
         show();
       }
     }).catch(function () {
       // ★ 探测失败（后端没起来）不要弹门禁——那会让人以为要输密码，
       //   而实际问题是服务没运行。放行让 app.js 去报真正的错。
-      if (onUnlock) onUnlock();
+      release();
     });
   }
 
-  global.gate = { start: start, show: show, hide: hide };
+  global.gate = { start: start, onReady: onReady, show: show, hide: hide };
 })(window);

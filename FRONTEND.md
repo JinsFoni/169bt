@@ -1222,16 +1222,20 @@ window.__archive = {
 
 ```
 页面加载
-  └─ gate.start(boot)
+  └─ gate.start(boot)          ← app.js 注册
        ├─ GET /api/auth/me
-       │    ├─ authenticated → hide() + boot()
+       │    ├─ authenticated → hide() + release()
        │    └─ 否则 → show()（聚焦密码框，暂停取数）
-       └─ 探测失败 → 直接 boot()
+       └─ 探测失败 → 直接 release()
+
+collect.js 另走 gate.onReady(restoreRunning)   ← 同一道门，各注各的
 ```
 
 | 决定 | 理由 |
 |---|---|
 | **由 gate 决定 app.js 何时启动** | 若 app.js 先跑，未认证时会收到 401 并弹「无法连接后端」——用户以为服务挂了，实际只是要输密码 |
+| **★ 解锁回调是多监听者，不是单槽位** | app.js 与 collect.js 都要等放行。只存一个回调的话，后注册的会把先注册的顶掉——症状是 app.js 再也不取数，页面永远空白 |
+| **★ collect.js 也必须走 `gate.onReady`** | 它原本是无条件 IIFE，页面一加载就 GET `/api/collect/status` → 未登录时 401，控制台报红（实测复现） |
 | 探测失败**不弹门禁** | 后端没起来时弹密码框会误导；交给 app.js 报真正的错 |
 | 门禁关闭时**不显示遮罩** | 没有密码就没有边界，把人挡在不存在的门外只会困惑 |
 | 401 → 「访问密码错误」；其余 → 如实转述 | 超时/离线说成「密码错误」会让人反复试密码 |

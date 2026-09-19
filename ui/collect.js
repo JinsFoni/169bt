@@ -311,12 +311,27 @@
 
   /* ---------- 启动：恢复进行中的任务 ---------- */
 
-  window.api.getCollectStatus().then(function (s) {
-    if (s && s.job) {
-      enterProgress(s.job);
-      poll();
-    }
-  }).catch(function () { /* 后端未起：静默，用户点按钮时才提示 */ });
+  /*
+   * ★ 必须经门禁放行后再取数（S-6）。
+   *
+   * 之前这里是无条件 IIFE，页面一加载就 GET /api/collect/status。门禁
+   * 开启时尚未登录 → 401，控制台报红；用户看到的是「坏了」，而实际只是
+   * 还没输密码。与 app.js 一致，改走 gate.onReady。
+   */
+  function restoreRunning() {
+    window.api.getCollectStatus().then(function (s) {
+      if (s && s.job) {
+        enterProgress(s.job);
+        poll();
+      }
+    }).catch(function () { /* 后端未起：静默，用户点按钮时才提示 */ });
+  }
+
+  if (window.gate && window.gate.onReady) {
+    window.gate.onReady(restoreRunning);
+  } else {
+    restoreRunning();
+  }
 
   window.__collect = {
     open: open,
