@@ -9,6 +9,7 @@
  *   POST /api/collect              → 202 {job}
  *   GET  /api/collect/status       → {job|null, recent[]}
  *   POST /api/collect/jobs/{id}/cancel
+ *   POST /api/collect/poll         → 202 {accepted, feed_url}（C-1 立即检查新帖）
  */
 (function () {
   'use strict';
@@ -23,6 +24,7 @@
   var fromInput = $('collectFrom');
   var toInput   = $('collectTo');
   var startBtn  = $('collectStart');
+  var pollBtn   = $('collectPoll');
   var cancelBtn = $('collectCancel');
   var bar       = $('collectBar');
   var note      = $('collectNote');
@@ -96,6 +98,9 @@
     formView.hidden = true;
     progView.hidden = false;
     startBtn.hidden = true;
+    // ★ 「检查新帖」也要藏：采集中再点必然 409（并发度恒为 1），
+    //   留着一个注定失败的按钮只会让人以为坏了。
+    pollBtn.hidden = true;
     cancelBtn.hidden = false;
     closeBtn.hidden = true;          // 采集中不允许误关（可取消）
     openBtn.classList.add('is-running');
@@ -108,6 +113,7 @@
     formView.hidden = false;
     progView.hidden = true;
     startBtn.hidden = false;
+    pollBtn.hidden = false;
     cancelBtn.hidden = true;
     closeBtn.hidden = false;
     openBtn.classList.remove('is-running');
@@ -152,6 +158,7 @@
     stopPoll();
     closeBtn.hidden = false;
     cancelBtn.hidden = true;
+    pollBtn.hidden = false;          // 采集结束，重新可点
     openBtn.classList.remove('is-running');
     paint(job);
     statusText.textContent = job.message || PHASE_TEXT[job.phase] || '已结束';
@@ -247,11 +254,41 @@
     });
   }
 
+  /**
+   * C-1：立即跑一轮 RSS 轮询（不必等 5 分钟的定时器）。
+   *
+   * ★ 不需要填日期：RSS 只回最近 20 条，轮询器自己算归档日期。
+   * ★ 通道被占时后端**同步**返回 409 —— 此时引导用户去看进度，
+   *   而不是干等一个不会出现的 202。
+   */
+  function pollNow() {
+    pollBtn.disabled = true;
+    window.api.pollNow().then(function () {
+      pollBtn.disabled = false;
+      toast('已开始检查新帖', 'ok');
+      // 有新帖就会建任务，跟着进度条走
+      window.api.getCollectStatus().then(function (s) {
+        if (s && s.job) { enterProgress(s.job); poll(); }
+      }).catch(function () {});
+    }).catch(function (e) {
+      pollBtn.disabled = false;
+      if (e.code === 'collect_running') {
+        toast('已有采集任务在运行，请等待其完成或取消。', 'err', { duration: 4600 });
+        window.api.getCollectStatus().then(function (s) {
+          if (s && s.job) { enterProgress(s.job); poll(); }
+        }).catch(function () {});
+        return;
+      }
+      toast('检查新帖失败：' + e.message, 'err', { duration: 4600 });
+    });
+  }
+
   /* ---------- 事件 ---------- */
 
   openBtn.addEventListener('click', open);
   closeBtn.addEventListener('click', close);
   startBtn.addEventListener('click', start);
+  pollBtn.addEventListener('click', pollNow);
   cancelBtn.addEventListener('click', cancel);
 
   modal.addEventListener('click', function (e) {

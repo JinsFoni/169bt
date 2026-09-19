@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass
+from typing import Any, Callable
 from datetime import date, timedelta
 
 from bt169 import config
@@ -30,7 +31,7 @@ from bt169.repo.collect import (
 )
 from bt169.repo.posts import PostRepo, now_iso
 from bt169.source.forum import FetchError, ForumClient, LoginRequired
-from bt169.source.parse import parse_thread_detail
+from bt169.source.parse import parse_rss, parse_thread_detail
 from bt169.source.thanks import ThanksClient, ThanksError
 
 from bt169.collector.imagecache import (
@@ -46,6 +47,9 @@ __all__ = [
     "CollectError",
     "date_range",
     "ValidateError",
+    "RssPoller",
+    "RssPollResult",
+    "POLL_INTERVAL_SECONDS",
 ]
 
 log = logging.getLogger(__name__)
@@ -182,14 +186,30 @@ class Collector:
         # ---------------- 阶段 1：发现
         self._jobs.update(job.id, phase="listing",
                           message=f"正在翻页查找 {job.from_date} 起的帖子")
-        tids, pages = self._discover(job, wanted)
+        items, pages = self._discover(job, wanted)
 
         self._jobs.update(
-            job.id, phase="fetching", total=len(tids), pages=pages,
-            message=f"发现 {len(tids)} 个帖子，开始抓取",
+            job.id, phase="fetching", total=len(items), pages=pages,
+            message=f"发现 {len(items)} 个帖子，开始抓取",
         )
-        # ---------------- 阶段 2：抓取
+        return self.fetch_items(job, items)
 
+    # ------------------------------------------------------------ 抓取阶段
+
+    def fetch_items(
+        self, job: CollectJob, items: list[tuple[int, str]]
+    ) -> CollectResult:
+        """抓取一批 ``(tid, post_date)`` 并推进任务状态。
+
+        抽出来给两条发现路径共用：
+
+        - :meth:`_run_job` —— 翻版块列表页（历史回填 / 手动采集 C-6、C-10）
+        - :class:`RssPoller` —— 读 RSS 订阅（定时轮询 C-1）
+
+        两边的差别**只在怎么发现 tid**；抓取、限速、感谢解锁、图片本地化、
+        跳过规则、取消、进度回调全部应该一模一样。复制一份到轮询里迟早会
+        漂移（比如只修了手动路径的跳过规则）。
+        """
         def _tick() -> None:
             """逐帖通知进度。
 
@@ -208,7 +228,7 @@ class Collector:
             except Exception:  # noqa: BLE001
                 log.warning("进度回调异常（已忽略）", exc_info=True)
 
-        for tid, post_date in tids:
+        for tid, post_date in items:
             if self._jobs.is_cancel_requested(job.id):
                 current = self._jobs.get(job.id)
                 done = current.processed if current else 0
@@ -437,6 +457,130 @@ class Collector:
         )
 
 
+#: RSS 轮询间隔。需求 C-1 建议 5–10 分钟；20 条窗口 ÷ 41 帖/天峰值
+#: → 5 分钟绰绰有余（每天 288 次 × 20 = 5760 条容量 vs 41 帖需求）。
+POLL_INTERVAL_SECONDS = 5 * 60
+
+
+@dataclass(frozen=True, slots=True)
+class RssPollResult:
+    """一次 RSS 轮询的结果。
+
+    ``checked`` / ``new`` / ``collected`` 三个数字刻意分开：
+
+    - ``checked``：feed 里有几个可用条目（含已入库的）
+    - ``new``：其中几个是库里没有的
+    - ``collected``：实际成功入库几个
+
+    合并成一个数字会看不出「feed 读到了但没采」与「feed 没读到」的差别，
+    而这两种情况的排查方向完全不同。
+    """
+
+    checked: int = 0
+    new: int = 0
+    collected: int = 0
+    skipped: int = 0
+    failed: int = 0
+    job_id: int | None = None
+    error: str | None = None
+
+
+@dataclass
+class RssPoller:
+    """定时轮询 RSS 发现新帖（C-1）。
+
+    ★ **绝不抛异常**：这是后台定时任务。网络挂了、被 WAF 拦了、feed 结构
+    变了——全部吞掉记在 :class:`RssPollResult` 里。异常逃出去只会静默
+    杀死轮询线程，用户从此再也发现不了新帖。
+
+    ★ **不与在跑的任务抢**：采集并发度恒为 1（封号风险硬约束）。
+    已有任务在跑时本轮只「发现」，不「采集」。
+
+    设计：RSS 只用于**发现**（tid + 发帖日期）。ed2k 在 ``<description>``
+    里被截断掉了（事实 #2），必须逐帖抓详情页——那是 :class:`Collector`
+    的活，这里不重复实现。
+    """
+
+    collector: Collector
+    posts: PostRepo
+    jobs: CollectRepo
+    feed: Any                     # 需有 .get(url) → 带 .text 的对象
+    feed_url: str
+    fid: str = config.DEFAULT_FID
+    #: 采集通道。给了就走它的锁（与手动采集真正互斥）。
+    runner: CollectRunner | None = None
+
+    def tick(self, *, claim: bool = True) -> RssPollResult:
+        """跑一轮。任何失败都记在返回值里，不抛。
+
+        Args:
+            claim: 是否自己去抢采集通道。调用方**已经持锁**时传 ``False``，
+                否则会发现自己被占着，本轮直接空转。
+        """
+        try:
+            xml = self._fetch()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("RSS 拉取失败：%s", exc)
+            return RssPollResult(error=str(exc))
+
+        items = parse_rss(xml)
+        if not items:
+            # ★ 空 feed 不是错误。被 WAF 拦时返回的 HTML 也走这条路。
+            #   注意不能因此认为「没有新帖」之外还发生了什么。
+            return RssPollResult(checked=0)
+
+        fresh = [(i.tid, i.post_date) for i in items
+                 if not self.posts.is_settled(i.tid)]
+        result = RssPollResult(checked=len(items), new=len(fresh))
+        if not fresh:
+            return result
+
+        # ★ 占住采集通道。并发度恒为 1 是封号风险的硬约束。
+        if claim and not self._claim():
+            log.info("采集通道被占用，本轮 RSS 只发现不采集（%s 个新帖）",
+                     len(fresh))
+            return result
+
+        job = None
+        try:
+            dates = [d for _, d in fresh]
+            job = self.jobs.create(
+                from_date=min(dates), to_date=max(dates), fid=self.fid)
+            # ★ 必须写 total：它平时由 `_run_job`（列表页路径）设置，
+            #   而 RSS 直连 `fetch_items`。不补上则 `percent` 永远是 0，
+            #   前端进度条一直空着（`total <= 0` 时 percent 只在终态返回 100）。
+            self.jobs.update(job.id, phase="fetching", total=len(fresh))
+            out = self.collector.fetch_items(job, fresh)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("RSS 轮询采集失败：%s", exc)
+            return RssPollResult(
+                checked=result.checked, new=result.new,
+                job_id=job.id if job else None, error=str(exc))
+        finally:
+            if claim and self.runner is not None:
+                self.runner.end()
+
+        return RssPollResult(
+            checked=result.checked, new=result.new,
+            collected=out.collected, skipped=out.skipped, failed=out.failed,
+            job_id=out.job_id,
+        )
+
+    def _claim(self) -> bool:
+        """尝试占住采集通道。
+
+        有 ``runner`` 时用它的锁（与手动采集真互斥）；没给时退化为
+        看数据库里有没有在跑的任务——单测常用这种轻量形式。
+        """
+        if self.runner is not None:
+            return self.runner.try_begin()
+        return self.jobs.active() is None
+
+    def _fetch(self) -> str:
+        page = self.feed.get(self.feed_url)
+        return page.text
+
+
 class CollectRunner:
     """把采集放到后台线程，并提供单飞保证。
 
@@ -449,11 +593,39 @@ class CollectRunner:
         self._jobs = jobs
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
+        #: 手动占用的通道（RSS 轮询用）。见 :meth:`try_begin`。
+        self._busy = False
 
     @property
     def running(self) -> bool:
+        """是否有人占着采集通道（后台线程或手动占位）。"""
         with self._lock:
+            if self._busy:
+                return True
             return self._thread is not None and self._thread.is_alive()
+
+    def try_begin(self) -> bool:
+        """非阻塞地占住采集通道，成功返回 True。
+
+        ★ 给 :class:`RssPoller` 用。它必须在**同一把锁**下与手动采集互斥，
+        不能只看 ``jobs.active()``：那是数据库层面的检查，与线程状态之间
+        有一个窗口——查完之后、建任务之前，手动采集可能刚好启动，
+        结果两个采集同时在跑。而「采集并发度恒为 1」是封号风险的硬约束。
+
+        拿到后必须用 :meth:`end` 释放。
+        """
+        with self._lock:
+            if self._busy:
+                return False
+            if self._thread is not None and self._thread.is_alive():
+                return False
+            self._busy = True
+            return True
+
+    def end(self) -> None:
+        """释放 :meth:`try_begin` 占的通道。可重复调用。"""
+        with self._lock:
+            self._busy = False
 
     def start(self, *, from_date: str, to_date: str,
               fid: str = config.DEFAULT_FID) -> CollectJob:
@@ -466,6 +638,8 @@ class CollectRunner:
         date_range(from_date, to_date)          # 先校验，失败不建任务
 
         with self._lock:
+            if self._busy:
+                raise CollectError("已有采集任务正在运行")
             if self._thread is not None and self._thread.is_alive():
                 raise CollectError("已有采集任务正在运行")
             # 进程重启后残留的 running 任务会挡住 create
@@ -485,6 +659,35 @@ class CollectRunner:
             )
             self._thread.start()
             return job
+
+    def start_poll(self, work: Callable[[bool], Any]) -> None:
+        """在**已持锁**的前提下起一个后台线程跑 ``work(claim)``。
+
+        给「手动触发 RSS 轮询」接口用。它能**同步**地判断通道是否空闲：
+        先 :meth:`try_begin`，拿不到就立刻抛 :class:`CollectError`（转 409），
+        而不是起了线程才在后台默默失败。拿到后把锁转交给后台线程，
+        由它跑完释放。
+
+        ``work`` 收到 ``claim=False``：告诉它通道已经被本方法占住了。
+        """
+        with self._lock:
+            if self._busy:
+                raise CollectError("已有采集任务正在运行")
+            if self._thread is not None and self._thread.is_alive():
+                raise CollectError("已有采集任务正在运行")
+            self._busy = True
+
+            def _worker() -> None:
+                try:
+                    work(False)
+                except Exception:  # noqa: BLE001
+                    log.exception("轮询线程异常")
+                finally:
+                    self.end()
+
+            self._thread = threading.Thread(
+                target=_worker, name="rss-poll-once", daemon=True)
+            self._thread.start()
 
     def join(self, timeout: float | None = None) -> None:
         """等待后台线程结束（测试用）。"""

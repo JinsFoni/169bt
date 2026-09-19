@@ -131,6 +131,11 @@
     cancelCollect: function (jobId) {
       return request('POST', '/api/collect/jobs/' + jobId + '/cancel');
     },
+    // C-1：立即跑一轮 RSS 轮询（定时器每 5 分钟跑一次，这个给
+    // 「刚发了新帖，现在就想要」）。★ 通道被占时后端同步返回 409。
+    pollNow: function () {
+      return request('POST', '/api/collect/poll');
+    },
 
     deletePost: function (tid) {
       return request('DELETE', '/api/posts/' + tid);

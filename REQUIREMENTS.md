@@ -454,6 +454,7 @@ ed2k      : ed2k://|file|s169bbs.com@START-624_[4K].mkv|7515146184|0B17E95CBBA18
 | W-16 自动重新登录 | ✅ | `SessionRenewer`（`source/session.py`）：进入续期窗口（≤5 天）或会话失效时主动重登录；**额度守卫**（≤1 次拒绝 / 距上次提交 <600 秒拒绝 / 900 秒窗口自动重置）；**绝不抛异常**；后端每 12 小时检查一次；`POST /api/status/renew` 手动触发；顶栏 chip 只在异常或临近过期时显示 |
 | W-17 站点配置 | ✅ | 设置面板「站点」分区（RSS / 用户名 / 密码），已落库 |
 | C-10 手动采集 | ✅ | 顶栏 `#collectBtn` + 日期范围弹窗 + 进度轮询 |
+| C-1 定时轮询 RSS | ✅ | `RssPoller`（`collector/__init__.py`）+ `_build_poll_loop`（每 5 分钟，`delay_first`）；只发现（ed2k 必须逐帖抓详情）；与手动采集**共用同一把采集锁**；`POST /api/collect/poll` 手动触发 |
 | W-15 图片本地化（后端） | ✅ | `collector/imagecache.py`；600px/1200px WebP；`/img` 静态分发带 immutable 缓存；删除联动引用计数 |
 | E-1~E-7 Emby 入库标记 | ✅ | `emby.py`（客户端 + 索引 + 同步器 + 定时器）；卡片图片区右上角「已入库」；浏览路径只读 DB；Emby 不可达时静默降级 |
 | T-1~T-8 TG 转发 | ✅ | `telegram.py` + `api/routes/telegram.py`；`sendMessage`（非 forwardMessage）；批量串行 + 间隔 3 秒；429 停手；`tg_sent_at` 幂等；设置页可发测试消息 |
@@ -492,7 +493,6 @@ ed2k      : ed2k://|file|s169bbs.com@START-624_[4K].mkv|7515146184|0B17E95CBBA18
 | 缺口 | 说明 |
 |---|---|
 | 无 service worker | 离线与 PWA 安装待做（`FRONTEND.md` §12） |
-| 定时轮询 RSS | C-1 待做：目前只有手动采集（C-10），无定时发现新帖 |
 
 ### B.2.1 已补齐的旧缺口（曾列入上表）
 

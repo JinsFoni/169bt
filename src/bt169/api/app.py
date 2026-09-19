@@ -55,6 +55,7 @@ def create_app(
 
     _install_error_handler(app)
     _install_emby_scheduler(app, emby_interval)
+    _install_poll_scheduler(app, emby_interval)
     from bt169.api.gate import GateMiddleware
     from bt169.api.routes import (
         auth,
@@ -105,12 +106,19 @@ def create_app(
 
 
 def _make_lifespan(interval: float):
-    """构造 lifespan：启动/停止 Emby 定时器（E-6）。
+    """构造 lifespan：启动/停止三个后台定时器。
+
+    三个定时器共用一个开关（``emby_interval``）：
+
+    - Emby 入库同步（E-6）
+    - 会话续期（W-16）
+    - RSS 轮询发现新帖（C-1）
 
     ★ 用 ``lifespan`` 而非已弃用的 ``on_event``：后者会在每次注册时
     追加处理器，且 FastAPI 已标记弃用。
 
     ★ 间隔为 0 时返回一个什么都不做的 lifespan——测试入口就是这种。
+    每个测试都建 app，默认开定时器会给每个测试起三个线程。
     """
     if not interval:
         return None
@@ -127,9 +135,15 @@ def _make_lifespan(interval: float):
         renewer = _build_renew_loop(app, RENEW_CHECK_SECONDS)
         app.state.renew_scheduler = renewer
         renewer.start()
+
+        # C-1：RSS 轮询。
+        poller = _build_poll_loop(app, POLL_CHECK_SECONDS)
+        app.state.poll_scheduler = poller
+        poller.start()
         try:
             yield
         finally:
+            poller.stop()
             renewer.stop()
             scheduler.stop()
 
@@ -187,6 +201,81 @@ def _build_renew_loop(app: FastAPI, interval: float):
 
 #: 会话续期的检查间隔（秒）。12 小时。
 RENEW_CHECK_SECONDS = 12 * 3600
+
+#: RSS 轮询的检查间隔（秒）。需求 C-1 建议 5–10 分钟，这里取 5 分钟。
+#: 20 条窗口 ÷ 41 帖/天峰值 → 每天 288 轮 × 20 = 5760 条容量，余量充足。
+POLL_CHECK_SECONDS = 5 * 60
+
+
+def _ensure_runner(app: FastAPI):
+    """把采集 runner 装配到 ``app.state``（幂等）。
+
+    ★ 必须与手动采集共用**同一个** runner：
+
+    - 它持有「采集通道」的锁，RSS 轮询靠 :meth:`CollectRunner.try_begin`
+      与手动采集真互斥。各建一个 runner 就是各有一把锁，两边会同时跑
+      采集，而「采集并发度恒为 1」是封号风险的硬约束。
+    - 它缓存了 ``ForumClient``（带 Cookie、带限速器）。两个实例意味着
+      两套限速器 → 限速形同虚设。
+
+    本函数在装配期调用（而不只是在首个请求里惰性建），这样轮询线程
+    拿到的一定是同一个对象。
+    """
+    if getattr(app.state, "collect_runner", None) is not None:
+        return
+    from bt169.api.routes.collect import build_runner
+
+    app.state.collect_runner = build_runner(app)
+
+
+def _install_poll_scheduler(app: FastAPI, interval: float) -> None:
+    """装配 RSS 轮询定时器（C-1）。
+
+    ★ **必须先把 runner 放进 state**：轮询器要拿它做采集通道互斥。
+      否则轮询会另建一个 collector（另一套限速器），而锁也各是一把。
+    """
+    if not interval:
+        return
+    _ensure_runner(app)
+    app.state.poll_scheduler = _build_poll_loop(app, _poll_interval(interval))
+
+
+def _build_poll_loop(app: FastAPI, interval: float):
+    """RSS 轮询定时器（C-1）。
+
+    ★ 复用 ``EmbyScheduler``：它已经处理好了「不抛异常 + 算下次该跑的时刻
+      + stop_event 能打断等待」。
+
+    ★ ``delay_first=True``：服务器重启是常见操作。RSS 不烧登录额度
+      （事实 #21），但启动即抓帖意味着每次重启都产生一轮真实论坛请求
+      + 2–5 秒限速。推迟一个 interval 更稳。
+
+    ★ 每次 tick **重建** poller 与 feed 客户端：用户改了 RSS 链接
+      或账号密码后无需重启服务。
+    """
+    from bt169.emby import EmbyScheduler
+
+    class _Adapter:
+        def sync(self):
+            from bt169.api.routes.collect import build_poller
+
+            poller = build_poller(app)
+            if poller is None:
+                return None          # 未配置订阅链接 → 静默跳过
+            result = poller.tick()
+            if result.new:
+                log.info("RSS 轮询：发现 %s 个新帖，采集 %s 个%s",
+                         result.new, result.collected,
+                         f"，错误：{result.error}" if result.error else "")
+            return result
+
+    return EmbyScheduler(build_syncer=lambda: _Adapter(), interval=interval,
+                         delay_first=True, name="rss-poll")
+
+
+#: 负数 = 「用默认间隔」哨兵（与 ``_build_emby_scheduler`` 一致）。
+def _poll_interval(interval: float) -> float:
+    return POLL_CHECK_SECONDS if interval < 0 else interval
 
 
 def _install_emby_scheduler(app: FastAPI, interval: float) -> None:
