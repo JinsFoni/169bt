@@ -174,6 +174,7 @@ GET https://169bt.com/forum.php?mod=forumdisplay&fid=192&orderby=dateline&page=N
 | E-5 | 匹配要防误判 | 番号需**边界**匹配，避免 `START-62` 命中 `START-624` |
 | E-6 | 缓存 + 定期核对 | 建议 10–30 分钟一次或手动刷新，**不可**每张卡片实时查库 |
 | E-7 | 失败降级 | Emby 不可达时**不显示标记、不报错、不阻塞浏览** |
+| E-8 | 媒体库列表**按用户过滤** | 设置页填了用户名 → 下拉框只列该用户能访问的库；找不到该用户 → 退回全部库并提示。**非安全边界**，只是「帮你少看几个库」 |
 
 ### 4.4 Telegram 转发（下载）
 
@@ -199,7 +200,7 @@ GET https://169bt.com/forum.php?mod=forumdisplay&fid=192&orderby=dateline&page=N
 | S-5 | **每个分区各有独立保存按钮** | 各自保存、各自反馈 |
 | S-6 | 基础设置 | 访问密码（**后端校验**：PBKDF2 哈希 + 会话 token）✅ |
 | S-7 | 网络代理 | 类型（HTTP/HTTPS/SOCKS5）/ 地址 / 端口 / 用户名 / 密码 |
-| S-8 | Emby | 服务器地址、API Key、用户、媒体库 |
+| S-8 | Emby | 服务器地址、API Key、用户、媒体库（媒体库列表按「用户」过滤，见 E-8） |
 | S-9 | Telegram | Bot Token、Chat ID |
 | S-10 | **站点** | RSS 订阅链接 / 用户名 / 密码（对应 W-17） |
 
@@ -306,7 +307,7 @@ GROUP BY post_date ORDER BY post_date DESC;
 | POST | `/api/archive/forward?date=…` | 批量转发该日全部 ed2k |
 | GET | `/api/emby/status` | 批量查询入库状态（按番号匹配），返回 `{tid: bool}` |
 | POST | `/api/emby/refresh` | 手动触发一次 Emby 媒体库核对 |
-| GET | `/api/emby/libraries` | Emby 媒体库列表（供设置页下拉） |
+| GET | `/api/emby/libraries` | Emby 媒体库列表（供设置页下拉）。按 `emby.username` 过滤，返回 `source`(`user`/`all`) / `filtered_by` / `warning` |
 | GET | `/api/settings` | 读取配置（密钥脱敏） |
 | PUT | `/api/settings` | 保存配置（按分区提交） |
 | POST | `/api/settings/test/emby` | 测试 Emby 连通性 |
@@ -503,6 +504,7 @@ ed2k      : ed2k://|file|s169bbs.com@START-624_[4K].mkv|7515146184|0B17E95CBBA18
 |---|---|
 | 采集需登录会话 | ✅ 已真实登录并采集，13 帖全 `done` |
 | Emby 媒体库下拉 | ✅ `GET /api/emby/libraries`，从 Emby 拉真实库列表 |
+| 媒体库按用户过滤（E-8） | ✅ 填了用户名 → 走 `/Users/{id}/Views`（实测 muse 11 库 / xy 8 / ym 8）；找不到 → 退回全部库 + 警示提示行 |
 | 无「测试连接」 | ✅ 设置页 TG「发送测试消息」、Emby「刷新入库状态」 |
 | 顶栏「下载本日」 | ✅ 已绑定 `POST /api/archive/forward`（P6） |
 

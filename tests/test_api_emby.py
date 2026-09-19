@@ -326,3 +326,141 @@ def test_app_scheduler_zero_disables(db, box):
 
     app = create_app(db, box=box, ui_dir=None, emby_interval=0)
     assert not hasattr(app.state, "emby_scheduler")
+
+
+# ---------------------------------------------------- 按用户过滤媒体库（S-8）
+
+
+def _route_http(*, users=None, views=None, vf=None, raise_exc=None):
+    """按路径分发的假 HTTP。
+
+    ``/Users``           → 顶层数组
+    ``/Users/{id}/Views`` → {"Items": [...]}
+    ``/Library/VirtualFolders`` → 顶层数组
+    """
+    class H:
+        def __init__(self):
+            self.calls = []
+
+        def get(self, url, *, params=None, headers=None, timeout=None):
+            self.calls.append(url)
+            if raise_exc is not None:
+                raise raise_exc
+            if url.endswith("/Users"):
+                body = json.dumps(users or [])
+            elif "/Views" in url:
+                body = json.dumps({"Items": views or []})
+            else:
+                body = json.dumps(vf or [])
+
+            class R:
+                pass
+
+            r = R()
+            r.status_code = 200
+            r.text = body
+            return r
+
+        def close(self):
+            pass
+
+    return H()
+
+
+def _set_user(db, box, name):
+    SettingsRepo(db, box).put(config.section_key("emby", "username"), name)
+
+
+def test_libraries_filters_by_username(emby_app, monkeypatch):
+    """★ 配了用户名 → 只返回该用户可见的库（用户新需求）。"""
+    from bt169.api.routes import emby as emby_routes
+
+    set_emby(emby_app.db, emby_app.box)
+    _set_user(emby_app.db, emby_app.box, "muse")
+    http = _route_http(
+        users=[{"Name": "muse", "Id": "U1"}],
+        views=[{"Id": "1373", "Name": "有码"}, {"Id": "332", "Name": "4K"}],
+        vf=[{"ItemId": "999", "Name": "不该出现"}],
+    )
+    monkeypatch.setattr(
+        emby_routes, "build_client",
+        lambda settings: emby_routes.EmbyClient(
+            url="http://e", api_key="K", http=http),
+    )
+    r = emby_app.get("/api/emby/libraries")
+    body = r.json()
+    assert body["ok"] is True
+    assert body["libraries"] == [{"id": "1373", "name": "有码"},
+                                 {"id": "332", "name": "4K"}]
+    assert body["source"] == "user" and body["filtered_by"] == "muse"
+    # ★ 走的是 /Users/{id}/Views，不是 VirtualFolders
+    assert any("/Users/U1/Views" in u for u in http.calls)
+    assert not any("VirtualFolders" in u for u in http.calls)
+
+
+def test_libraries_without_username_uses_admin_view(emby_app, monkeypatch):
+    """★ 没配用户名 → 退回管理员视角（全部库），并说明未过滤。"""
+    from bt169.api.routes import emby as emby_routes
+
+    set_emby(emby_app.db, emby_app.box)
+    http = _route_http(vf=[{"ItemId": "lib1", "Name": "电影"}])
+    monkeypatch.setattr(
+        emby_routes, "build_client",
+        lambda settings: emby_routes.EmbyClient(
+            url="http://e", api_key="K", http=http),
+    )
+    r = emby_app.get("/api/emby/libraries")
+    body = r.json()
+    assert body["ok"] is True
+    assert body["libraries"] == [{"id": "lib1", "name": "电影"}]
+    assert body["source"] == "all" and body["filtered_by"] is None
+    assert any("VirtualFolders" in u for u in http.calls)
+
+
+def test_libraries_unknown_username_falls_back(emby_app, monkeypatch):
+    """★ 用户名在 Emby 里不存在 → 退回全部库 + 提示（方案 A）。
+
+    过滤只是「帮你少看几个库」，不是安全边界——找不到人时宁可多给
+    几个库，也不要让设置页整个用不了。
+    """
+    from bt169.api.routes import emby as emby_routes
+
+    set_emby(emby_app.db, emby_app.box)
+    _set_user(emby_app.db, emby_app.box, "查无此人")
+    http = _route_http(
+        users=[{"Name": "muse", "Id": "U1"}],
+        vf=[{"ItemId": "lib1", "Name": "电影"}],
+    )
+    monkeypatch.setattr(
+        emby_routes, "build_client",
+        lambda settings: emby_routes.EmbyClient(
+            url="http://e", api_key="K", http=http),
+    )
+    r = emby_app.get("/api/emby/libraries")
+    body = r.json()
+    assert body["ok"] is True
+    assert body["libraries"] == [{"id": "lib1", "name": "电影"}]
+    assert body["source"] == "all"
+    assert "查无此人" in (body["warning"] or "")
+
+
+def test_libraries_case_mismatch_falls_back(emby_app, monkeypatch):
+    """★ 大小写不匹配 = 找不到 → 退回全部库（不静默匹配别人）。"""
+    from bt169.api.routes import emby as emby_routes
+
+    set_emby(emby_app.db, emby_app.box)
+    _set_user(emby_app.db, emby_app.box, "Muse")   # 库里只有 muse
+    http = _route_http(
+        users=[{"Name": "muse", "Id": "U1"}],
+        vf=[{"ItemId": "lib1", "Name": "电影"}],
+    )
+    monkeypatch.setattr(
+        emby_routes, "build_client",
+        lambda settings: emby_routes.EmbyClient(
+            url="http://e", api_key="K", http=http),
+    )
+    r = emby_app.get("/api/emby/libraries")
+    body = r.json()
+    assert body["source"] == "all"
+    assert body["libraries"] == [{"id": "lib1", "name": "电影"}]
+    assert "Muse" in (body["warning"] or "")

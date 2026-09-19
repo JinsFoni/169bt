@@ -103,28 +103,71 @@ def libraries(
     except EmbyNotConfigured as exc:
         return {"ok": False, "error": str(exc), "libraries": []}
 
+    username = (settings.get(config.section_key("emby", "username")) or "").strip()
+
     try:
-        rows = _list_views(client)
+        rows, source, warning = _list_views(client, username)
     except EmbyError as exc:
         return {"ok": False, "error": str(exc), "libraries": []}
 
-    return {"ok": True, "error": None, "libraries": rows}
+    return {"ok": True, "error": None, "libraries": rows,
+            "source": source, "filtered_by": username or None,
+            "warning": warning}
 
 
-def _list_views(client: EmbyClient) -> list[dict[str, str]]:
-    """拉用户视图（媒体库）列表。
+def _list_views(
+    client: EmbyClient, username: str = ""
+) -> tuple[list[dict[str, str]], str, str | None]:
+    """拉媒体库列表，**尽量**按用户名过滤。
 
-    Emby 的 ``/Users/{userId}/Views`` 需要 userId；``/Library/VirtualFolders``
-    则直接可用（管理员视角）。这里用后者——个人自用场景下 API Key 就是
-    管理员权限，少一次往返、也少一个要配的字段。
+    ★ 这是「帮你少看几个库」，**不是安全边界**（用户拍板）。所以三个分支：
+
+    1. 配了用户名且能在 Emby 里找到 → ``/Users/{id}/Views``，只给该用户
+       可见的库。``source="user"``。
+    2. 没配用户名 → ``/Library/VirtualFolders``（管理员视角，全部库）。
+       ``source="all"``。
+    3. 配了但找不到（含大小写不匹配）→ **退回全部库**并给出 warning。
+       宁可多给几个库，也不要让设置页整个用不了。
+
+    Returns:
+        ``(rows, source, warning)``。
+
+    Raises:
+        EmbyError: 拿库列表本身失败（网络 / 非 200）。
+    """
+    if username:
+        try:
+            user_id = client.resolve_user_id(username)
+            views = client.list_views(user_id)
+            return _rows_from_views(views, key="Id"), "user", None
+        except EmbyError as exc:
+            # 找不到用户 / 拉视图失败 → 退回全部库，但要让设置页说清楚
+            rows = _admin_views(client)
+            return rows, "all", f"{exc}；已退回显示全部媒体库"
+
+    return _admin_views(client), "all", None
+
+
+def _rows_from_views(rows: list[dict[str, Any]], *, key: str) -> list[dict[str, str]]:
+    """归一成 ``[{id, name}]``。
+
+    ★ 两个端点的 id 字段名**不一样**：``/Users/{id}/Views`` 用 ``Id``，
+      ``/Library/VirtualFolders`` 用 ``ItemId``。赌错顺序或字段名会静默
+      得到空列表。
+    """
+    out = []
+    for row in rows:
+        if isinstance(row, dict) and row.get(key):
+            out.append({"id": str(row[key]),
+                        "name": str(row.get("Name") or "未命名")})
+    return out
+
+
+def _admin_views(client: EmbyClient) -> list[dict[str, str]]:
+    """管理员视角的全部库（``/Library/VirtualFolders``）。
 
     ★ 这个端点返回的是**顶层数组**（``/Items`` 返回对象），所以走 ``_get_raw``。
     """
     payload = client._get_raw("/Library/VirtualFolders", {})
     rows = payload if isinstance(payload, list) else (payload.get("Items") or [])
-    out = []
-    for row in rows:
-        if isinstance(row, dict) and row.get("ItemId"):
-            out.append({"id": str(row["ItemId"]),
-                        "name": str(row.get("Name") or "未命名")})
-    return out
+    return _rows_from_views(rows, key="ItemId")

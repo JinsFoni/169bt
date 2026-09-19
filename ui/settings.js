@@ -172,7 +172,33 @@
 
       sel.innerHTML = opts.join('');
       sel.value = keep;
+      renderLibHint(res);
     }).catch(function () { /* 静默，见上 */ });
+  }
+
+  /* 媒体库下拉框下面的提示行。
+
+     说清楚列表是**按用户名过滤过的**还是**全部库**——否则用户会以为
+     Emby 里少了几个库（或多了几个）。source 由后端给：
+       "user" → 已按该用户权限过滤
+       "all"  → 管理员视角（没配用户名 / 用户名找不到）
+     warning 非空时用警示色。 */
+  function renderLibHint(res) {
+    var hint = $('embyLibHint');
+    if (!hint) return;
+
+    var src = res && res.source;
+    var who = (res && res.filtered_by) || '';
+    hint.classList.remove('is-warn');
+
+    if (src === 'user') {
+      hint.textContent = '仅显示 Emby 用户「' + who + '」能访问的媒体库。';
+    } else if (res && res.warning) {
+      hint.textContent = res.warning;
+      hint.classList.add('is-warn');
+    } else {
+      hint.textContent = '留空 = 全部媒体库。填了用户名则只显示该用户能访问的库。';
+    }
   }
 
   function escHtml(s) {
@@ -229,6 +255,13 @@
       });
 
       setState(section, skipped.length ? '已保存（密钥未改）' : '已保存', 'ok');
+
+      // ★ 改完 Emby 用户名/地址后，媒体库列表与提示行必须**当场**重拉。
+      //   不重拉的话，用户改完用户名点保存，看到的还是按**旧**用户过滤的
+      //   列表——会以为过滤坏了（或以为改没生效），只好关面板重开。
+      if (section === 'emby') {
+        loadLibraries($('embyLib') ? $('embyLib').value : '');
+      }
     }).catch(function (e) {
       btn.disabled = false;
       setState(section, e.message, 'err');

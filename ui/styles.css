@@ -829,6 +829,8 @@ body::before {
 
 .field-hint { margin: 7px 0 0; font-size: 11.5px; color: var(--text-dim); }
 .field-hint code { font-size: 11px; color: var(--text-mid); }
+/* 媒体库列表退回「全部库」时用警示色说清楚——否则用户以为 Emby 少了几个库 */
+.field-hint.is-warn { color: var(--danger); }
 
 .field-row { display: flex; gap: 12px; }
 .field-grow { flex: 1; }

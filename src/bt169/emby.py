@@ -160,6 +160,39 @@ class EmbyClient:
 
         return out
 
+    def list_views(self, user_id: str) -> list[dict[str, Any]]:
+        """拉某个用户**可见**的媒体库列表。
+
+        Raises:
+            EmbyError: 网络失败、非 200、响应不是合法 JSON。
+        """
+        payload = self._get(f"/Users/{user_id}/Views", {})
+        rows = payload.get("Items") or []
+        return [r for r in rows if isinstance(r, dict)]
+
+    def resolve_user_id(self, username: str) -> str:
+        """按用户名查 Emby 用户 Id（用于 ``/Users/{id}/Views``）。
+
+        ★ **大小写敏感、精确匹配**（用户明确要求）。Emby 里 ``muse`` 与
+          ``Muse`` 是两个不同账号、权限不同；大小写不敏感会静默拿到
+          **别人的**权限集合，不如报错。
+
+        ★ 匹配的是 ``Name`` 字段。``/Users`` 返回的是**顶层数组**。
+
+        Raises:
+            EmbyError: 用户名为空、找不到该用户、或请求失败。
+        """
+        name = (username or "").strip()
+        if not name:
+            raise EmbyError("未配置 Emby 用户名")
+
+        payload = self._get_raw("/Users", {})
+        rows = payload if isinstance(payload, list) else (payload.get("Items") or [])
+        for row in rows:
+            if isinstance(row, dict) and row.get("Name") == name and row.get("Id"):
+                return str(row["Id"])
+        raise EmbyError(f"Emby 中找不到用户「{name}」")
+
     def _get(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
         payload = self._get_raw(path, params)
         if not isinstance(payload, dict):

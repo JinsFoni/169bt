@@ -608,3 +608,55 @@ def test_scheduler_delay_first_stop_interrupts_deferred_wait():
     t.join(timeout=2.0)
     assert not t.is_alive(), "推迟等待未能被 stop_event 打断"
     assert calls == [], "停止信号后不该再 tick"
+
+
+# ------------------------------------------------------------ 用户解析（库过滤）
+
+
+def users(*specs):
+    """``/Users`` 返回**顶层数组**，条目含 Name / Id。"""
+    return json.dumps([{"Name": n, "Id": i} for n, i in specs])
+
+
+def test_resolve_user_id_exact_match():
+    """★ 精确匹配用户名 → 拿到 Id。
+
+    真实 Emby 的 ``/Users`` 条目形如 ``{"Name":"muse","Id":"68f6…"}``。
+    """
+    http = FakeHTTP(body=users(("mario", "u1"), ("muse", "u2"), ("xy", "u3")))
+    c = EmbyClient(url="http://e", api_key="k", http=http)
+
+    assert c.resolve_user_id("muse") == "u2"
+    assert http.calls[0][0].endswith("/Users")
+
+
+def test_resolve_user_id_is_case_sensitive():
+    """★ 大小写必须敏感（用户明确要求）。
+
+    Emby 里 ``muse`` 与 ``Muse`` 是两个不同的账号，各自权限不同。
+    大小写不敏感会静默匹配到**别人的**权限集合——这里宁可报错。
+    """
+    http = FakeHTTP(body=users(("muse", "u2")))
+    c = EmbyClient(url="http://e", api_key="k", http=http)
+
+    with pytest.raises(EmbyError):
+        c.resolve_user_id("Muse")
+
+
+def test_resolve_user_id_not_found_raises():
+    http = FakeHTTP(body=users(("muse", "u2")))
+    c = EmbyClient(url="http://e", api_key="k", http=http)
+
+    with pytest.raises(EmbyError) as ei:
+        c.resolve_user_id("不存在的人")
+    assert "不存在的人" in str(ei.value)
+
+
+def test_resolve_user_id_empty_username_raises():
+    """空用户名不该发请求——调用方应先判断，这里兜底。"""
+    http = FakeHTTP(body=users(("muse", "u2")))
+    c = EmbyClient(url="http://e", api_key="k", http=http)
+
+    with pytest.raises(EmbyError):
+        c.resolve_user_id("")
+    assert http.calls == []
