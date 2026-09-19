@@ -30,7 +30,9 @@ IMAGE_DIR = DATA_DIR / "images"
 UI_DIR = PROJECT_ROOT / "ui"
 
 #: 落库前必须加密的设置键名（比对的是**最后一段**）。
-SECRET_FIELDS = frozenset({"password", "token", "apikey", "api_key", "secret"})
+SECRET_FIELDS = frozenset(
+    {"password", "token", "apikey", "api_key", "secret", "api_hash", "session"}
+)
 
 #: 设置分区（与前端设置弹窗一一对应）。顺序即展示顺序。
 SETTINGS_SECTIONS = ("site", "basic", "proxy", "emby", "tg")

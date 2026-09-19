@@ -181,15 +181,44 @@ class ForumClient:
         data: dict[str, str],
         headers: dict[str, str] | None = None,
         count_rate: bool = False,
+        follow_redirects: bool = True,
     ) -> _Page:
-        """POST 表单。默认不计入浏览限速（登录/感谢有各自的节奏）。"""
+        """POST 表单。默认不计入浏览限速（登录/感谢有各自的节奏）。
+
+        Args:
+            follow_redirects: 对 3xx 重定向自动 GET（**默认 True**）。
+                Discuz 插件（如感谢）处理完 POST 后走 PRG 模式
+                （Post-Redirect-Get），且实测发的是 **301** 而非 302——
+                浏览器会静默跟随，如果在这里报错，感谢在服务端明明
+                已成功，本地却把帖子误标为 failed（2026-09-19 实测：
+                「失败」的 15 帖 ed2k 全部可见）。inajax 接口（登录）
+                响应体即判定结果，必须传 ``False`` 保持严格。
+        """
         if count_rate:
             self._limiter.wait()
         url = path if path.startswith("http") else f"{self.base}/{path}"
         try:
             resp = self._client.post(url, data=data, headers=headers or {})
+            # ★ 手动跟随 PRG 重定向：限制 5 跳防环，只接受 3xx 作为
+            #   重定向信号；登录墙识别与 get_page 同一套逻辑。
+            for _ in range(5):
+                if resp.status_code not in (301, 302, 303, 307, 308):
+                    break
+                loc = resp.headers.get("location", "")
+                if not loc:
+                    raise FetchError(f"重定向缺少 location：{url}")
+                # httpx 会解析相对 location 并带上必要的请求头
+                req = resp.next_request
+                resp = self._client.send(req) if req is not None \
+                    else self._client.get(loc, headers=headers or {})
         except httpx.HTTPError as exc:
             raise FetchError(f"请求失败：{url}：{exc}") from exc
+        if resp.status_code in (301, 302, 303, 307, 308):
+            # 跳数用尽仍是 3xx → 重定向环
+            loc = resp.headers.get("location", "")
+            if "mod=logging" in loc:
+                raise LoginRequired(f"会话失效，被重定向到登录页：{loc}")
+            raise FetchError(f"重定向次数超限（疑似重定向环）：{loc or url}")
         if resp.status_code != 200:
             raise FetchError(f"HTTP {resp.status_code}：{url}")
         return _Page(url=url, text=resp.text, status=resp.status_code)

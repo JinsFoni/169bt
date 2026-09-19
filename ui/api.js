@@ -157,6 +157,21 @@
     testTelegram: function () {
       return request('POST', '/api/settings/test/telegram');
     },
+    // MTProto 登录向导（三步）。429 时 request 会抛错,
+    // 错误对象带 retryAfter（由 handle429 填充,见下）。
+    tgLoginStart: function (phone) {
+      return request('POST', '/api/tg/login/start', { phone: phone }, 60000);
+    },
+    tgLoginVerify: function (code) {
+      return request('POST', '/api/tg/login/verify', { code: code }, 60000);
+    },
+    tgLoginPassword: function (password) {
+      return request('POST', '/api/tg/login/password',
+        { password: password }, 60000);
+    },
+    tgLoginCancel: function () {
+      return request('POST', '/api/tg/login/cancel');
+    },
 
     // Emby 入库标记（P7）。两个都返回 200 + {ok, error}，不用错误分支。
     // ★ refreshEmby 内部会同步整个媒体库，大库可能要几十秒，给足超时。

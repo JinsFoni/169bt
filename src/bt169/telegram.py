@@ -5,8 +5,9 @@
 - **用 ``sendMessage`` 而非 ``forwardMessage``**：Telegram 的
   ``forwardMessage`` 要求源消息已存在于某个会话，而我们手里只有一段
   ed2k 文本（需求里的「转发」是中文口语意义的「发过去」）。
-- **ed2k 独占一行**：Bot 侧（aria2 / qBittorrent 插件）通常按行提取链接，
-  混在文字里会解析失败。
+- **ed2k 独占一行 / 只发链接**：消息就是链接本身，不带番号/演员等头部
+  信息（用户指定）。Bot 侧（aria2 / qBittorrent 插件）按行提取链接，
+  零杂讯最稳。
 - **幂等**：发送前查 ``tg_sent_at``，成功后写入。语义是「已提交」而非
   「已下载」。
 - **限流**：Telegram 群组约 20 条/分钟；429 响应带 ``retry_after``，必须遵守。
@@ -83,30 +84,18 @@ class HTTPLike(Protocol):
 
 
 def build_message(post: Post) -> str:
-    """构造要发送的文本。
+    """构造要发送的文本：**只有 ed2k 链接本身**（用户指定）。
 
-    格式（ed2k **必须独占一行**）::
-
-        【ABC-101】某人 2026-09-17 7GB
-        ed2k://|file|...
-
-    无 ed2k 时抛 :class:`TelegramError`——需求 T-5 明确禁止转发未解锁帖。
+    早先版本带「【番号】演员 日期 体积」头部；实测 Bot 侧只需要链接，
+    额外文字只是噪声，且多一条解析出错的机会。无 ed2k 时抛
+    :class:`TelegramError`——需求 T-5 明确禁止转发未解锁帖。
     """
     if not post.ed2k:
         raise TelegramError(
             f"帖子 {post.tid} 没有 ed2k 链接，无法转发（尚未解锁）"
         )
 
-    head_bits = [f"【{post.code or post.tid}】"]
-    if post.actress:
-        head_bits.append(post.actress)
-    if post.release_date:
-        head_bits.append(post.release_date)
-    if post.size:
-        head_bits.append(post.size)
-
-    msg = " ".join(head_bits) + "\n" + post.ed2k
-    return msg[:MAX_MESSAGE_LEN]
+    return post.ed2k[:MAX_MESSAGE_LEN]
 
 
 # --------------------------------------------------------------------- 客户端
@@ -194,9 +183,13 @@ class TelegramClient:
 
         return int(payload.get("result", {}).get("message_id", 0))
 
+    #: 传输层统一契约：``send(text) -> message_id``。
+    #: MtpSender（方案 A）同构实现同名方法，业务层无需感知差异。
+    send = send_message
+
     def test(self) -> None:
         """发一条测试消息，验证凭据可用（设置面板「测试」按钮）。"""
-        self.send_message("169bt 测试消息：Telegram 配置可用。")
+        self.send("169bt 测试消息：Telegram 配置可用。")
 
 
 # --------------------------------------------------------------------- 转发
@@ -218,7 +211,7 @@ def forward_post(
         raise AlreadySent(f"帖子 {post.tid} 已于 {post.tg_sent_at} 转发过")
 
     text = build_message(post)
-    message_id = client.send_message(text)
+    message_id = client.send(text)
     posts_repo.mark_tg_sent(post.tid, _now())
     log.info("帖子 %s 已转发到 Telegram（message_id=%s）", post.tid, message_id)
     return message_id

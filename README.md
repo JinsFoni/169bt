@@ -20,6 +20,7 @@ python3 -m venv .venv
 |---|---|
 | `bt169 serve [--host H] [--port P] [--reload]` | 启动 Web 服务（默认只监听回环） |
 | `bt169 login [--username U] [--password P]` | 登录论坛并保存会话（Cookie 30 天） |
+| `bt169 tg-login` | 登录 Telegram 账号（MTProto，交互式），session 加密存入设置。用于 ed2k 转发 |
 | `bt169 collect --from D --to D [--fid N]` | 采集指定日期范围（前台阻塞、实时进度） |
 | `bt169 migrate` | 建库 / 升级 schema（幂等） |
 | `bt169 doctor` | 环境自检，逐项 ✓/✗ |

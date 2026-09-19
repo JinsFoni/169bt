@@ -35,6 +35,16 @@ router = APIRouter(prefix="/api/emby", tags=["emby"])
 _sync_lock = threading.Lock()
 
 
+def get_sync_lock() -> threading.Lock:
+    """同步互斥锁。
+
+    ★ 模块级单例（而非 per-app）：手动刷新、定时器、采集完成回调
+    三条路径都从这里拿同一把，才能真的串行。单用户单进程场景下，
+    模块级与 app 级没有区别；分散在各处各建一把反而是隐患。
+    """
+    return _sync_lock
+
+
 def get_posts(request: Request) -> PostRepo:
     return PostRepo(request.app.state.db)
 
@@ -84,6 +94,9 @@ def refresh(
             return SyncResponse(ok=False, error=str(exc))
 
         result = EmbySyncer(client=client, posts_repo=posts).sync()
+        log.info("手动刷新：库内 %s 条，检查 %s 帖，命中 %s%s",
+                 result.library_items, result.checked, result.in_library,
+                 f"，错误：{result.error}" if result.error else "")
         return SyncResponse(**result.to_dict())
     finally:
         _sync_lock.release()

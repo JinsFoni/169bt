@@ -1,5 +1,6 @@
 # tests/test_cli.py
 from bt169.__main__ import build_parser, main
+from bt169.crypto import SecretBox
 
 
 def test_parser_has_subcommands():
@@ -396,3 +397,93 @@ def test_doctor_passes_with_clean_size(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "size 残留注解" not in out or "✓" in out
     assert rc == 0
+
+
+# ---------------------------------------------------------------- tg-login
+
+
+def test_tg_login_parser():
+    ns = build_parser().parse_args(["tg-login"])
+    assert ns.command == "tg-login"
+
+
+def test_tg_login_saves_session(tmp_path, monkeypatch, capsys):
+    """输入手机号+验证码 → StringSession 加密落库（密文字段）。"""
+    import io
+
+    from bt169 import config
+    from bt169.crypto import SecretBox
+    from bt169.db import Database
+    from bt169.repo.settings import SettingsRepo
+
+    monkeypatch.setattr("bt169.config.DB_PATH", tmp_path / "x.db")
+    monkeypatch.setattr("bt169.config.DATA_DIR", tmp_path)
+    monkeypatch.setattr("bt169.__main__._load_or_create_key",
+                        lambda: SecretBox(b"0" * 32))
+
+    db = Database(tmp_path / "x.db")
+    db.migrate()
+    sr = SettingsRepo(db, SecretBox(b"0" * 32))
+    sr.put(config.section_key("tg", "api_id"), "12345")
+    sr.put(config.section_key("tg", "api_hash"), "deadbeef")
+    db.close()
+
+    saved = {}
+
+    class FakeSigner:
+        def start(self, *, phone_cb, code_cb, password_cb):
+            saved["phone"] = phone_cb()
+            saved["code"] = code_cb()
+            saved["pw"] = password_cb()
+            return "SESSIONSTRING123"
+
+    import bt169.__main__ as m
+    monkeypatch.setattr(m, "_tg_signer",
+                        lambda *, api_id, api_hash: FakeSigner())
+
+    answers = iter(["+8613800000000", "12345", "s3cret"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+
+    rc = main(["tg-login"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "登录成功" in out
+    assert saved == {
+        "phone": "+8613800000000",
+        "code": "12345",
+        "pw": "s3cret",
+    }
+
+    # session 加密落库 + 回读
+    db = Database(tmp_path / "x.db")
+    sr = SettingsRepo(db, SecretBox(b"0" * 32))
+    assert sr.get(config.section_key("tg", "session")) == "SESSIONSTRING123"
+    raw = db.read().execute(
+        "SELECT encrypted FROM settings WHERE key=?",
+        (config.section_key("tg", "session"),),
+    ).fetchone()
+    assert raw["encrypted"] == 1
+    db.close()
+
+
+def test_tg_login_aborts_on_empty_phone(tmp_path, monkeypatch, capsys):
+    """手机号为空 → 直接退出，不进验证码。"""
+    monkeypatch.setattr("bt169.config.DB_PATH", tmp_path / "x.db")
+    monkeypatch.setattr("bt169.config.DATA_DIR", tmp_path)
+    monkeypatch.setattr("bt169.__main__._load_or_create_key",
+                        lambda: SecretBox(b"0" * 32))
+
+    import bt169.__main__ as m
+    called = {"n": 0}
+
+    class FakeSigner:
+        def start(self, *, phone_cb, code_cb, password_cb):
+            called["n"] += 1
+            return "S"
+
+    monkeypatch.setattr(m, "_tg_signer",
+                        lambda *, api_id, api_hash: FakeSigner())
+    monkeypatch.setattr("builtins.input", lambda prompt="": "")
+
+    assert main(["tg-login"]) == 2
+    assert called["n"] == 0

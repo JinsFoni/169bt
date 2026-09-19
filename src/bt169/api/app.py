@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -11,9 +12,11 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from bt169 import __version__
-from bt169.config import IMAGE_DIR, UI_DIR
+from bt169.config import IMAGE_DIR, UI_DIR, section_key
+from bt169.emby import SYNC_INTERVAL_SECONDS
 from bt169.crypto import SecretBox
 from bt169.db import Database
+from bt169.source.parse import TZ_ARCHIVE
 
 __all__ = ["create_app"]
 
@@ -151,8 +154,14 @@ def _make_lifespan(interval: float):
 
 
 def _build_emby_scheduler(app: FastAPI, interval: float):
-    """构造定时同步器。每次 tick 重建同步器——用户在设置页改地址后无需重启。"""
-    from bt169.emby import SYNC_INTERVAL_SECONDS, EmbyScheduler, EmbySyncer
+    """构造定时同步器。每次 tick 重建同步器——用户在设置页改地址后无需重启。
+
+    ★ **cron 驱动**（同 RSS 轮询的 E-9 模式）：``next_delay`` 闭包每次
+    触发后重读 ``emby.cron``，改表达式无需重启。未配 cron → 默认
+    15 分钟（E-6 现行为不变）；``interval`` 仍作 ``EmbyScheduler``
+    的字段保留（cron 模式下被 ``next_delay`` 忽略），供测试断言用。
+    """
+    from bt169.emby import EmbyScheduler, EmbySyncer
 
     def build():
         from bt169.api.routes.emby import build_client
@@ -168,7 +177,58 @@ def _build_emby_scheduler(app: FastAPI, interval: float):
     return EmbyScheduler(
         build_syncer=build,
         interval=SYNC_INTERVAL_SECONDS if interval < 0 else interval,
+        next_delay=lambda: emby_delay_seconds(_emby_cron(app)),
     )
+
+
+def _emby_cron(app: FastAPI) -> str:
+    """读 ``emby.cron``。取不到（密钥坏了/库锁了）→ 当作未配置。"""
+    from bt169.repo.settings import SettingsRepo
+
+    try:
+        return SettingsRepo(app.state.db, app.state.box).get(
+            section_key("emby", "cron")) or ""
+    except Exception as exc:  # noqa: BLE001 — 后台线程，绝不抛
+        log.warning("读取 Emby 定时刷新表达式失败：%s", exc)
+        return ""
+
+
+def emby_delay_seconds(
+    expression: str | None, *, wall: Any = None
+) -> float:
+    """算出「距下次入库状态刷新还有多少秒」。**恒有返回值，绝不抛。**
+
+    - 表达式为空 → :data:`EMBY_FALLBACK_SECONDS`（默认 15 分钟，E-6）
+    - 表达式非法 → 同上 + 日志（定时器是后台线程，不能抛）
+    - 否则 → 下一个 cron 时刻 − 现在，**恒为正且 ≥ 1 秒**
+
+    ★ 与 :func:`poll_delay_seconds` 同源同规则，只差空值语义：
+    RSS 空 cron 是「醒来但不干活」（兜底 60 s），Emby 空 cron 是
+    「按默认间隔干」（900 s）——RSS 抓论坛烧额度，多醒无害；Emby
+    同步只读本地 + 一次 Emby API，按默认节奏跑就是正确的现状。
+    """
+    expr = (expression or "").strip()
+    if not expr:
+        return EMBY_FALLBACK_SECONDS
+
+    from bt169.source.cron import CronError, parse_cron
+
+    try:
+        cron = parse_cron(expr)
+    except CronError as exc:
+        log.warning("Emby 定时刷新表达式非法（%r）：%s", expr, exc)
+        return EMBY_FALLBACK_SECONDS
+
+    if wall is None:
+        import time
+        wall = time.time
+
+    now = datetime.fromtimestamp(wall(), TZ_ARCHIVE)
+    nxt = cron.next_after(now)
+    if nxt is None:
+        log.warning("Emby 定时刷新表达式不可达（%r）", expr)
+        return EMBY_FALLBACK_SECONDS
+    return max(1.0, (nxt - now).total_seconds())
 
 
 def _build_renew_loop(app: FastAPI, interval: float):
@@ -252,6 +312,12 @@ def _build_poll_loop(app: FastAPI, interval: float):
 
     ★ 每次 tick **重建** poller 与 feed 客户端：用户改了 RSS 链接
       或账号密码后无需重启服务。
+
+    ★ **等待时长改由 cron 表达式决定**（E-9，``site.rss_cron``）：
+      ``interval`` 已**不再用于 RSS**，只保留形参以兼容现有调用点。
+      未配 cron → 返回**兜底间隔**（醒来但不干活），因此填上表达式
+      **无需重启**即生效。这符合「后台定时器默认必须关闭」——
+      空 cron 时不抓帖，但线程保持活着以接住新配置。
     """
     from bt169.emby import EmbyScheduler
 
@@ -259,9 +325,20 @@ def _build_poll_loop(app: FastAPI, interval: float):
         def sync(self):
             from bt169.api.routes.collect import build_poller
 
+            # ★ 空 cron = 不做定时检查。这里是「是否干活」的判断点，
+            #   与「何时醒来」（``next_delay``）分开：醒来很便宜
+            #   （只读一次设置），抓帖不便宜（真请求论坛 + 限速）。
+            if not _rss_cron(app).strip():
+                return None
+
             poller = build_poller(app)
             if poller is None:
                 return None          # 未配置订阅链接 → 静默跳过
+
+            # ★ DEBUG 级：cron 触发时留个痕迹。否则「发现 0 个新帖」
+            #   这条路径在日志与库里都没任何痕迹，用户问「为什么不
+            #   自动检查」时无从诊断。
+            log.debug("RSS 订阅检查：cron 触发")
             result = poller.tick()
             if result.new:
                 log.info("RSS 轮询：发现 %s 个新帖，采集 %s 个%s",
@@ -269,13 +346,92 @@ def _build_poll_loop(app: FastAPI, interval: float):
                          f"，错误：{result.error}" if result.error else "")
             return result
 
+    # ★ cron 驱动（E-9）：每次触发后从库里重读表达式。
+    #   用闭包重读而不是启动时快照——用户在设置页改完就生效，不必重启。
+    def delay() -> float | None:
+        return poll_delay_seconds(_rss_cron(app))
+
     return EmbyScheduler(build_syncer=lambda: _Adapter(), interval=interval,
-                         delay_first=True, name="rss-poll")
+                         delay_first=True, name="rss-poll",
+                         next_delay=delay)
+
+
+def _rss_cron(app: FastAPI) -> str:
+    """读 ``site.rss_cron``。取不到（密钥坏了/库锁了）→ 当作未配置。"""
+    from bt169.repo.settings import SettingsRepo
+
+    try:
+        return SettingsRepo(app.state.db, app.state.box).get(
+            section_key("site", "rss_cron")) or ""
+    except Exception as exc:  # noqa: BLE001 — 后台线程，绝不抛
+        log.warning("读取 RSS 订阅检查表达式失败：%s", exc)
+        return ""
+
+
+def poll_delay_seconds(
+    expression: str | None, *, wall: Any = None
+) -> float:
+    """算出「距下次订阅检查还有多少秒」。**恒有返回值，绝不抛。**
+
+    - 表达式为空 → :data:`POLL_FALLBACK_SECONDS`
+    - 表达式非法 → 同上 + 日志（定时器是后台线程，不能抛）
+    - 否则 → 下一个 cron 时刻 − 现在，**恒为正**
+
+    ★ **空表达式返回兜底间隔，而不是让定时器退出**：若返回 ``None``
+      使线程结束，用户之后在设置页填上表达式就必须重启服务才生效——
+      而本项目已确立「改了配置无需重启」（每次 tick 重建 poller 就是
+      这个理由）。「何时醒来」与「是否干活」是两件事，分开处理。
+
+    ★ 用 ``time.time()``（墙上时钟）而非 ``time.monotonic()``：
+      cron 是日历语义，必须与墙上时间对齐。
+
+    ★ 结果夹到最小 1 秒：NTP 回拨时若返回 0 或负数，
+      ``_wait_until`` 会立刻返回 → 忙循环疯狂抓论坛。
+    """
+    expr = (expression or "").strip()
+    if not expr:
+        return POLL_FALLBACK_SECONDS
+
+    from bt169.source.cron import CronError, parse_cron
+
+    try:
+        cron = parse_cron(expr)
+    except CronError as exc:
+        log.warning("RSS 订阅检查表达式非法（%r）：%s", expr, exc)
+        return POLL_FALLBACK_SECONDS
+
+    if wall is None:
+        import time
+        wall = time.time
+
+    now = datetime.fromtimestamp(wall(), TZ_ARCHIVE)
+    nxt = cron.next_after(now)
+    if nxt is None:
+        log.warning("RSS 订阅检查表达式不可达（%r）", expr)
+        return POLL_FALLBACK_SECONDS
+    return max(1.0, (nxt - now).total_seconds())
 
 
 #: 负数 = 「用默认间隔」哨兵（与 ``_build_emby_scheduler`` 一致）。
 def _poll_interval(interval: float) -> float:
     return POLL_CHECK_SECONDS if interval < 0 else interval
+
+
+#: 未配置 cron 表达式时的**醒来**间隔（E-9）。
+#:
+#: ★ 这是「何时醒来」而非「多久抓一次」——醒来后 ``_Adapter.sync``
+#:   会看到 cron 为空并直接返回。
+#:
+#: ★ 选 60 秒而非 5 分钟：醒来成本只是**读一次 SQLite 设置**（微秒级），
+#:   但用户填完表达式后要等满这个间隔才生效。5 分钟太长，会让人以为
+#:   「填了没用」而反复保存、或以为要重启服务。
+POLL_FALLBACK_SECONDS = 60
+
+
+#: Emby 定时刷新未配 cron 时的间隔。即 E-6 的默认节奏（15 分钟），
+#: 也就是 SYNC_INTERVAL_SECONDS —— 单独命名是为了让「空 cron = 默认」
+#: 这个语义在 emby_delay_seconds 里自解释。
+EMBY_FALLBACK_SECONDS = SYNC_INTERVAL_SECONDS
 
 
 def _install_emby_scheduler(app: FastAPI, interval: float) -> None:

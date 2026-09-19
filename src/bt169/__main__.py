@@ -42,6 +42,12 @@ def build_parser() -> argparse.ArgumentParser:
     lg.add_argument("--username", help="论坛用户名（默认读设置里的「站点」分区）")
     lg.add_argument("--password", help="论坛密码（默认读设置）")
 
+    tgl = sub.add_parser(
+        "tg-login", help="登录 Telegram 账号（MTProto），生成 session 存入设置"
+    )
+    tgl.add_argument("--api-id", help="my.telegram.org 的 api_id（默认读设置 tg.api_id）")
+    tgl.add_argument("--api-hash", help="my.telegram.org 的 api_hash（默认读设置 tg.api_hash）")
+
     c = sub.add_parser("collect", help="采集指定日期范围的帖子（前台运行）")
     c.add_argument("--from", dest="from_date", required=True,
                    metavar="YYYY-MM-DD", help="起始日期（含）")
@@ -70,6 +76,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_collect(args)
     if args.command == "login":
         return _cmd_login(args)
+    if args.command == "tg-login":
+        return _cmd_tg_login(args)
     parser.print_usage(sys.stderr)
     return 2
 
@@ -173,6 +181,109 @@ def _cmd_login(args: argparse.Namespace) -> int:
         session = store.load()
         if session is not None:
             print(f"会话有效期至：{session.expires_at}")
+    finally:
+        db.close()
+    return 0
+
+
+
+class _TelethonSigner:
+    """Telethon 的 ``start`` 适配器：统一为同步契约。
+
+    start(phone_cb, code_cb, password_cb) -> StringSession 字符串。
+    ★ TelegramClient 构造时就要求 api_id/api_hash（Telethon 硬约束）。
+    """
+
+    def __init__(self, *, api_id: int, api_hash: str) -> None:
+        import telethon.sync  # noqa: F401  ★ 缺它协程永不执行
+
+        from telethon import TelegramClient
+        from telethon.sessions import StringSession
+
+        self._client = TelegramClient(
+            StringSession(), int(api_id), api_hash
+        )
+
+    def start(self, phone_cb, code_cb, password_cb):
+        self._client.start(
+            phone=phone_cb, code_callback=code_cb, password=password_cb
+        )
+        return self._client.session.save()
+
+    def close(self):
+        try:
+            self._client.disconnect()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _tg_signer(*, api_id: int, api_hash: str):
+    """构造登录器（独立函数便于测试替换）。"""
+    return _TelethonSigner(api_id=api_id, api_hash=api_hash)
+
+
+def _cmd_tg_login(args: argparse.Namespace) -> int:
+    """登录 Telegram 用户账号（MTProto），StringSession 加密落库。
+
+    ★ 交互式命令：需要手机号 → 验证码（→ 两步验证密码）。session
+    等于账号凭据，因此像其他密钥一样走 SecretBox 加密（键名
+    ``tg.session`` 最后一段不在 SECRET_FIELDS —— 见下方显式加密说明）。
+    """
+    from bt169.repo.settings import SettingsRepo
+
+    db = Database(config.DB_PATH)
+    try:
+        db.migrate()
+        box = _load_or_create_key()
+        settings = SettingsRepo(db, box)
+
+        api_id = (args.api_id or settings.get(
+            config.section_key("tg", "api_id")) or "").strip()
+        api_hash = (args.api_hash or settings.get(
+            config.section_key("tg", "api_hash")) or "").strip()
+        if not api_id or not api_hash:
+            print(
+                "缺少 api_id / api_hash。请先在 my.telegram.org 创建应用，"
+                "并在 Web 设置面板的「Telegram」分区填写（或用 --api-id/--api-hash 传入）。",
+                file=sys.stderr,
+            )
+            return 2
+
+        print("连接 Telegram …")
+        signer = _tg_signer(api_id=int(api_id), api_hash=api_hash)
+        try:
+            # 统一契约：start(phone, code_cb, password_cb) -> session 字符串。
+            # 真实实现内部包 Telethon（sync 模块已挂同步包装）。
+            session_str = signer.start(
+                phone_cb=lambda: input("手机号（含国家码，如 +8613800000000）：").strip(),
+                code_cb=lambda: input("请输入 Telegram 发来的验证码：").strip(),
+                password_cb=lambda: input("两步验证密码（未设置请直接回车）：").strip(),
+            )
+        except Exception as exc:  # noqa: BLE001 — 登录层什么都可能抛
+            print(f"登录失败：{exc}", file=sys.stderr)
+            return 1
+        finally:
+            close = getattr(signer, "close", None)
+            if close:
+                close()
+
+        if not session_str:
+            print("登录失败：未取得会话", file=sys.stderr)
+            return 1
+
+        # StringSession 是账号凭据 → 必须加密。键名 ``tg.session`` 最后一段
+        # 是 ``session``，不在 SECRET_FIELDS 中，这里显式走 box.encrypt。
+        key = config.section_key("tg", "session")
+        with db.write() as conn:
+            conn.execute(
+                "INSERT INTO settings(key, value, encrypted, updated_at)"
+                " VALUES(?,?,1,?)"
+                " ON CONFLICT(key) DO UPDATE SET"
+                " value=excluded.value, encrypted=1, updated_at=excluded.updated_at",
+                (key, box.encrypt(session_str), __import__("bt169.repo.posts", fromlist=["now_iso"]).now_iso()),
+            )
+        print("登录成功：session 已加密存入设置（tg.session）。")
+        print("如尚未填写，请在设置页补全 tg.api_id / tg.api_hash / tg.target。")
     finally:
         db.close()
     return 0

@@ -321,6 +321,9 @@ class LoginClient:
             },
             headers={"Referer": form.referer,
                      "X-Requested-With": "XMLHttpRequest"},
+            # ★ inajax 响应体就是判定结果（XML），不走 PRG，
+            #   必须严格非 200 报错——不跟随重定向。
+            follow_redirects=False,
         ).text
 
         return self._interpret(body)

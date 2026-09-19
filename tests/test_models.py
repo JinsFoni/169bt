@@ -78,6 +78,9 @@ def test_dto_exact_key_set():
         "cover", "detail", "ed2k", "post_date", "status", "emby_in_library",
         # T-7：前端靠它把已转发的卡片显示为「已发」
         "tg_sent_at",
+        # ★ 灯箱原图档：卡片缩略图（600px）放大到灯箱尺寸会糊，
+        #   大图改用源图原样字节（回退：原图档 → 缩略图 → 图床源 URL）
+        "cover_orig", "detail_orig",
     }
 
 

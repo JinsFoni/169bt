@@ -19,6 +19,7 @@ from bt169.repo.collect import (
     JOB_CANCELLED,
     JOB_DONE,
     JOB_FAILED,
+    JOB_RUNNING,
     CollectRepo,
 )
 from bt169.repo.posts import PostRepo
@@ -595,7 +596,10 @@ class FakeImages:
         return hashlib.sha1(url.encode()).hexdigest()[:16]
 
     def url_for(self, key: str, width: int) -> str:
-        return f"/img/{key[:2]}/{key}-{width}.webp"
+        # ★ 原图档（0）后缀是 ``orig``、扩展名随源格式（真实 ImageCache
+        #   见 ``suffix_for``/``path_for``），不再是 ``-{width}.webp``。
+        suffix = "orig.jpg" if width == 0 else f"{width}.webp"
+        return f"/img/{key[:2]}/{key}-{suffix}"
 
     def ensure(self, url: str):  # type: ignore[no-untyped-def]
         from bt169.collector.imagecache import CachedImage
@@ -604,7 +608,8 @@ class FakeImages:
         key = self.key_for(url)
         return CachedImage(url=url, key=key,
                            variants={600: self.url_for(key, 600),
-                                     1200: self.url_for(key, 1200)},
+                                     1200: self.url_for(key, 1200),
+                                     0: self.url_for(key, 0)},
                            bytes_in=1, bytes_out=1)
 
     def ensure_post(self, detail):
@@ -621,7 +626,8 @@ class FakeImages:
             out[field] = CachedImage(
                 url=url, key=key,
                 variants={600: self.url_for(key, 600),
-                          1200: self.url_for(key, 1200)},
+                          1200: self.url_for(key, 1200),
+                          0: self.url_for(key, 0)},
                 bytes_in=100, bytes_out=10,
             )
         return out
@@ -946,3 +952,97 @@ def test_post_date_survives_multi_day_range(env):
         from_date="2026-09-12", to_date="2026-09-14")
     assert {t: posts.get(t).post_date for t in (101, 102, 103)} == {
         101: "2026-09-14", 102: "2026-09-13", 103: "2026-09-12"}
+
+
+# ------------------------------------------------- 完成回调（Emby 钩子）
+
+
+def test_job_done_callback_fires_with_tids(env):
+    """★ 任务成功收尾后回调,拿到**本次采到**的 tid(跳过的不算)。
+
+    且回调时任务还是 running——「看到 done ⇒ 徽章必已就位」
+    的时序契约由这里锁定。
+    """
+    db, posts, jobs = env
+    posts.upsert_collected(
+        tid=101, title="已有", code=None, actress=None, release_date=None,
+        size=None, cover_img=None, detail_img=None, ed2k="ed2k://|file|a|1|AB|/",
+        post_date="2026-09-14", status="done",
+    )
+    fc = FakeForum(pages={1: rows((101, "2026-09-14"), (102, "2026-09-14"))},
+                   details={102: make_detail(102)})
+    c = Collector(client=fc, posts=posts, jobs=jobs)  # type: ignore[arg-type]
+    seen: list[list[int]] = []
+    status_in_callback: list[str] = []
+
+    def spy(tids):  # type: ignore[no-untyped-def]
+        seen.append(tids)
+        status_in_callback.append(jobs.get(jobs.active().id).status)  # type: ignore[union-attr]
+
+    c.on_job_done = spy
+    c.run(from_date="2026-09-14", to_date="2026-09-14")  # type: ignore[arg-type]
+    assert seen == [[102]]
+    assert status_in_callback == [JOB_RUNNING]   # 回调先于 done
+    assert jobs.recent(1)[0].status == JOB_DONE  # 回调后才落终态
+
+
+def test_job_done_callback_not_fired_on_cancel_or_fail(env):
+    """取消路径不回调（用户主动停,不该再等一次 Emby 往返）。"""
+    db, posts, jobs = env
+    tids = [(100 + i, "2026-09-14") for i in range(5)]
+    fc = FakeForum(pages={1: rows(*tids)},
+                   details={t: make_detail(t) for t, _ in tids})
+    c = Collector(client=fc, posts=posts, jobs=jobs)  # type: ignore[arg-type]
+    seen: list[list[int]] = []
+    c.on_job_done = seen.append
+
+    original = fc.fetch_thread
+    def fetch_and_cancel(tid):  # type: ignore[no-untyped-def]
+        if len(fc.fetch_calls) == 2:
+            jobs.request_cancel(jobs.active().id)  # type: ignore[union-attr]
+        return original(tid)
+    fc.fetch_thread = fetch_and_cancel  # type: ignore[method-assign]
+
+    result = c.run(from_date="2026-09-14", to_date="2026-09-14")
+    assert result.status == JOB_CANCELLED
+    assert seen == []
+
+    # 登录失效路径同样不回调
+    seen.clear()
+    fc2 = FakeForum(pages={1: rows((201, "2026-09-15"))}, details={})
+    fc2.login_required_tids = {201}
+    c2 = Collector(client=fc2, posts=posts, jobs=jobs)  # type: ignore[arg-type]
+    c2.on_job_done = seen.append
+    with pytest.raises(LoginRequired):
+        c2.run(from_date="2026-09-15", to_date="2026-09-15")
+    assert seen == []
+
+
+def test_job_done_callback_exception_swallowed(env):
+    """回调抛异常只记日志——Emby 挂了不能让采集显得失败。"""
+    db, posts, jobs = env
+    fc = FakeForum(pages={1: rows((101, "2026-09-14"))},
+                   details={101: make_detail(101)})
+    c = Collector(client=fc, posts=posts, jobs=jobs)  # type: ignore[arg-type]
+    def boom(tids):  # type: ignore[no-untyped-def]
+        raise RuntimeError("Emby 爆炸")
+    c.on_job_done = boom
+    result = c.run(from_date="2026-09-14", to_date="2026-09-14")  # type: ignore[arg-type]
+    assert result.status == JOB_DONE
+    assert posts.get(101) is not None
+
+
+def test_job_done_callback_not_fired_when_nothing_collected(env):
+    """全部跳过 → 没有新帖,没必要查 Emby。"""
+    db, posts, jobs = env
+    posts.upsert_collected(
+        tid=101, title="已有", code=None, actress=None, release_date=None,
+        size=None, cover_img=None, detail_img=None, ed2k="ed2k://|file|a|1|AB|/",
+        post_date="2026-09-14", status="done",
+    )
+    fc = FakeForum(pages={1: rows((101, "2026-09-14"))}, details={})
+    c = Collector(client=fc, posts=posts, jobs=jobs)  # type: ignore[arg-type]
+    seen: list[list[int]] = []
+    c.on_job_done = seen.append
+    c.run(from_date="2026-09-14", to_date="2026-09-14")  # type: ignore[arg-type]
+    assert seen == []

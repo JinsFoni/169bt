@@ -37,8 +37,10 @@ from bt169.source.thanks import ThanksClient, ThanksError
 from bt169.collector.imagecache import (
     CARD_WIDTH,
     LIGHTBOX_WIDTH,
+    ORIGINAL,
     ImageCache,
     ImageError,
+    matches_width,
 )
 
 __all__ = [
@@ -77,10 +79,20 @@ class CollectResult:
     message: str | None
 
 
-#: 每个字段该用哪一档宽度。两处写入（新采 + 补图）共用，避免漂移。
-WIDTH_FOR_FIELD: dict[str, int] = {
-    "cover": CARD_WIDTH,        # 卡片缩略图
-    "detail": LIGHTBOX_WIDTH,   # 灯箱大图
+#: 每个字段要写哪些列、各用哪一档。两处写入（新采 + 补图）共用，避免漂移。
+#:
+#: ★ 一字段对多列：卡片与灯箱需要不同分辨率，而**同一张源图**
+#: 只需下载一次（``ensure`` 内部去重）。早先只写一列，结果要么
+#: 卡片加载原图（单页 11 MB），要么灯箱放大糊图（实测放大 1.88×）。
+FIELD_TARGETS: dict[str, tuple[tuple[str, int], ...]] = {
+    "cover": (
+        ("cover_local", CARD_WIDTH),      # 卡片缩略图
+        ("cover_orig", ORIGINAL),          # 灯箱看原图
+    ),
+    "detail": (
+        ("detail_local", LIGHTBOX_WIDTH),  # 中间档
+        ("detail_orig", ORIGINAL),          # 灯箱看原图
+    ),
 }
 
 
@@ -137,6 +149,13 @@ class Collector:
         self._on_login_required = on_login_required
         # 进度回调（CLI 用）。默认无操作，避免每帖都判 None。
         self._on_progress: Callable[[CollectJob], None] | None = None
+        #: 任务成功收尾后的回调（**手动采集与 RSS 轮询两条路径共用**，
+        #: 因为它们共用同一个 Collector 实例）。收到本次采到的 tid 列表。
+        #: 供「采完立即检查 Emby 入库状态」用。**时序契约：回调返回
+        #: 之后任务才落 done**，因此回调方看到 done 就能保证徽章已
+        #: 写入库；回调异常只记日志，与 ``_on_progress`` 同理——
+        #: 附属动作不该拖垮采集。
+        self.on_job_done: Callable[[list[int]], None] | None = None
 
     # ---------------------------------------------------------------- 主流程
 
@@ -228,6 +247,7 @@ class Collector:
             except Exception:  # noqa: BLE001
                 log.warning("进度回调异常（已忽略）", exc_info=True)
 
+        collected_tids: list[int] = []
         for tid, post_date in items:
             if self._jobs.is_cancel_requested(job.id):
                 current = self._jobs.get(job.id)
@@ -256,6 +276,7 @@ class Collector:
             self._jobs.update(job.id, current_tid=tid)
             try:
                 self._collect_one(tid, post_date)
+                collected_tids.append(tid)
                 self._jobs.bump(job.id, processed=1, collected=1)
                 _tick()
             except LoginRequired as exc:
@@ -270,12 +291,20 @@ class Collector:
                 _tick()
 
         final = self._jobs.get(job.id)
-        self._jobs.finish(
-            job.id, status=JOB_DONE,
-            message=f"完成：新增 {final.collected if final else 0} 个，"
-                    f"跳过 {final.skipped if final else 0} 个，"
-                    f"失败 {final.failed if final else 0} 个",
-        )
+        msg = (f"完成：新增 {final.collected if final else 0} 个，"
+               f"跳过 {final.skipped if final else 0} 个，"
+               f"失败 {final.failed if final else 0} 个")
+        # ★ 先查 Emby 再落终态：同步慢 1～3 秒,这段时间任务还停在
+        #   running,前端轮询不会提前拿到 done；一旦 done,徽章必已就位。
+        #   若反过来先 finish,前端看到 done 立刻重载,徽章还没写进库,
+        #   用户只能等 15 分钟定时器或手动刷新——那这个功能就白做了。
+        #   回调异常只记日志：Emby 挂了不该让采集任务显得失败。
+        if collected_tids and self.on_job_done is not None:
+            try:
+                self.on_job_done(collected_tids)
+            except Exception:  # noqa: BLE001
+                log.warning("job_done 回调异常（已忽略）", exc_info=True)
+        self._jobs.finish(job.id, status=JOB_DONE, message=msg)
         return self._summarize(job.id)
 
     # ---------------------------------------------------------------- 发现
@@ -375,10 +404,11 @@ class Collector:
     def _localize(self, detail) -> dict[str, str | None]:  # type: ignore[no-untyped-def]
         """把封面图/详情图本地化，返回要写入的本地路径。
 
-        ★ 两档宽度各有用途（`FRONTEND.md` §8.3 / §531）：
+        ★ 每张源图**一次下载**生成全部档位，再分发给各自的列：
 
-        - ``cover_local`` → **600px**：卡片缩略图
-        - ``detail_local`` → **1200px**：灯箱大图
+        - ``cover_local``  → **600px**：卡片缩略图
+        - ``detail_local`` → **1200px**：中间档
+        - ``cover_orig`` / ``detail_orig`` → **原图**：灯箱大图
 
         早先两列都写 600px，结果 1200px 文件白生成（占了一半磁盘），
         而灯箱只能显示 600px 的模糊图——**生成的东西必须有人用**。
@@ -390,11 +420,11 @@ class Collector:
         if self._images is None:
             return {}
         cached = self._images.ensure_post(detail)
-        return {
-            f"{field}_local": img.variants.get(WIDTH_FOR_FIELD[field])
-            for field, img in cached.items()
-            if field in WIDTH_FOR_FIELD
-        }
+        out: dict[str, str | None] = {}
+        for field, img in cached.items():
+            for col, width in FIELD_TARGETS.get(field, ()):
+                out[col] = img.variants.get(width)
+        return out
 
     def _repair_images(self, tid: int) -> None:
         """补齐已入库帖子的缺失本地图（不访问论坛）。
@@ -414,29 +444,36 @@ class Collector:
                 return
             for field in ("cover", "detail"):
                 url = getattr(post, f"{field}_img", None)
-                local = getattr(post, f"{field}_local", None)
                 if not url:
                     continue
-                want = WIDTH_FOR_FIELD[field]
-                # ★ 三个条件都要看：
-                #   - 文件在不在（磁盘）
-                #   - 路径记没记（数据库）
-                #   - 记的**宽度对不对**（见下）
-                #
-                # 只看 has() 会漏掉「文件在、但 cover_local 是 NULL」的情况
-                # （例如迁移/手改库），那时前端白白回退到外链。
-                #
-                # 只看「非空 + has()」会漏掉**宽度记错**的情况：早先版本
-                # 把 detail_local 也写成 600px，而 1200px 文件本来就在，
-                # has() 返回 True → 永远跳过 → 灯箱一直显示 600px 模糊图。
-                if local and self._images.has(url) and local.endswith(
-                    f"-{want}.webp"
-                ):
-                    continue
-                self._images.ensure(url)
-                self._posts.set_local_image(tid, field, self._images.url_for(
-                    self._images.key_for(url), want,
-                ))
+                # ★ 一个源图对应多列（缩略图 + 原图），逐列检查。
+                #   早先只检查一列，导致「原图档没生成」永远不会被发现。
+                cached = None
+                for col, want in FIELD_TARGETS[field]:
+                    local = getattr(post, col, None)
+                    # ★ 三个条件都要看：
+                    #   - 文件在不在（磁盘）
+                    #   - 路径记没记（数据库）
+                    #   - 记的**宽度对不对**（见下）
+                    #
+                    # 只看 has() 会漏掉「文件在、但 cover_local 是 NULL」的
+                    # 情况（例如迁移/手改库），那时前端白白回退到外链。
+                    #
+                    # 只看「非空 + has()」会漏掉**档位记错**的情况：早先版本
+                    # 把 detail_local 也写成 600px，而 1200px 文件本来就在，
+                    # has() 返回 True → 永远跳过 → 灯箱一直显示 600px 模糊图。
+                    #
+                    # ★ 匹配 ``-orig.`` / ``-600.webp`` 而非 ``endswith("orig")``：
+                    #   原图档是 ``-orig.jpg``，拿后缀名去比恒为 False，
+                    #   会导致每次采集都重下原图。
+                    if (local and self._images.has(url)
+                            and matches_width(local, want)):
+                        continue
+                    if cached is None:
+                        cached = self._images.ensure(url)
+                    self._posts.set_local_image(
+                        tid, col, cached.variants[want],
+                    )
         except Exception as exc:  # noqa: BLE001
             log.warning("帖子 %s 补图失败（不影响采集）：%s", tid, exc)
 

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -464,3 +465,196 @@ def test_libraries_case_mismatch_falls_back(emby_app, monkeypatch):
     assert body["source"] == "all"
     assert body["libraries"] == [{"id": "lib1", "name": "电影"}]
     assert "Muse" in (body["warning"] or "")
+
+
+# ------------------------------------------------- 采集完成后立即检查
+
+
+def test_collect_done_triggers_emby_check(db, box, monkeypatch):
+    """★ 采集任务成功收尾后，立即对本次采到的帖子做一次 Emby 检查。
+
+    端到端走**真实装配路径**（route → ``build_runner`` 装钩子 →
+    采集收尾回调 → Emby）：新帖的入库标记当场出现，不等 15 分钟定时器。
+    """
+    from bt169.api.app import create_app
+    from bt169.api.routes import collect as collect_routes
+    from bt169.api.routes import emby as emby_routes
+    from bt169.collector import Collector
+    from bt169.emby import EmbyClient
+    from bt169.repo.posts import PostRepo
+    from bt169.source.parse import ListRow, ThreadDetail
+    from fastapi.testclient import TestClient
+
+    # Emby 假 HTTP：媒体库里只有 START-11
+    http = FakeHTTP(body=items(("e1", "START-11")))
+    monkeypatch.setattr(
+        emby_routes, "build_client",
+        lambda settings: EmbyClient(url="http://e", api_key="K", http=http),
+    )
+
+    # 论坛假客户端：两帖,番号分别 START-11（应命中）与 START-22
+    class FC:
+        def list_page(self, *, fid="192", page=1):
+            return [ListRow(tid=11, title="T11", post_date="2026-09-14",
+                            reply_count=0),
+                    ListRow(tid=22, title="T22", post_date="2026-09-14",
+                            reply_count=0)]
+
+        def fetch_thread(self, tid):
+            return ThreadDetail(
+                tid=tid, title=f"标题 {tid}", code=f"START-{tid}", actress="某",
+                release_date="2026-09-17", size="7GB",
+                cover_img=None, detail_img=None,
+                ed2k=f"ed2k://|file|{tid}.mkv|1|AB|/", locked=False,
+            )
+
+        def close(self):
+            pass
+
+    # ★ 不自建 runner：monkeypatch build_collector，让 build_runner 走
+    #   真实路径装钩子——自建 runner 等于绕过了被测的接线本身。
+    monkeypatch.setattr(
+        collect_routes, "build_collector",
+        lambda app: Collector(client=FC(), posts=PostRepo(db),
+                              jobs=collect_routes.CollectRepo(db)),
+    )
+
+    app = create_app(db, box=box, ui_dir=None)
+
+    with TestClient(app) as c:
+        r = c.post("/api/collect",
+                   json={"from_date": "2026-09-14", "to_date": "2026-09-14"})
+        assert r.status_code == 202, r.text
+        job_id = r.json()["job"]["id"]
+
+        # 后台线程同步等它跑完（采集无网络,立即完成）
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            s = c.get("/api/collect/status").json()
+            jobs = [j for j in s.get("recent", []) if j["id"] == job_id]
+            if jobs and jobs[0]["status"] == "done":
+                break
+            time.sleep(0.05)
+        assert jobs and jobs[0]["status"] == "done", "采集应已成功收尾"
+
+    posts = PostRepo(db)
+    p11, p22 = posts.get(11), posts.get(22)
+    # ★ 立即检查已发生：命中库的帖子带标记 + Emby item id
+    assert p11.emby_status == "in_library" and p11.emby_item_id == "e1"
+    # 未命中的也要写「查过但不在库」（否则前端拿旧缓存）
+    assert p22.emby_status == "none" and p22.emby_item_id is None
+    assert p11.emby_checked and p22.emby_checked
+    assert http.calls, "采集收尾必须发起过一次 Emby 检查"
+
+
+def test_collect_done_callback_failure_does_not_fail_job(db, box, monkeypatch):
+    """Emby 挂了（同步器返回 error）→ 任务照常 done,不受牵连（E-7）。"""
+    from bt169.api.app import create_app
+    from bt169.api.routes import collect as collect_routes
+    from bt169.api.routes import emby as emby_routes
+    from bt169.collector import Collector
+    from bt169.emby import EmbyClient
+    from bt169.repo.posts import PostRepo
+    from bt169.source.parse import ListRow, ThreadDetail
+    from fastapi.testclient import TestClient
+
+    http = FakeHTTP(raise_exc=OSError("Emby 连接被拒"))
+    monkeypatch.setattr(
+        emby_routes, "build_client",
+        lambda settings: EmbyClient(url="http://e", api_key="K", http=http),
+    )
+
+    class FC:
+        def list_page(self, *, fid="192", page=1):
+            return [ListRow(tid=11, title="T11", post_date="2026-09-14",
+                            reply_count=0)]
+
+        def fetch_thread(self, tid):
+            return ThreadDetail(
+                tid=tid, title=f"标题 {tid}", code=f"START-{tid}", actress="某",
+                release_date="2026-09-17", size="7GB",
+                cover_img=None, detail_img=None,
+                ed2k=f"ed2k://|file|{tid}.mkv|1|AB|/", locked=False,
+            )
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        collect_routes, "build_collector",
+        lambda app: Collector(client=FC(), posts=PostRepo(db),
+                              jobs=collect_routes.CollectRepo(db)),
+    )
+    app = create_app(db, box=box, ui_dir=None)
+
+    with TestClient(app) as c:
+        r = c.post("/api/collect",
+                   json={"from_date": "2026-09-14", "to_date": "2026-09-14"})
+        job_id = r.json()["job"]["id"]
+        deadline = time.time() + 10
+        jobs = []
+        while time.time() < deadline:
+            s = c.get("/api/collect/status").json()
+            jobs = [j for j in s.get("recent", []) if j["id"] == job_id]
+            if jobs and jobs[0]["status"] == "done":
+                break
+            time.sleep(0.05)
+        assert jobs and jobs[0]["status"] == "done", "Emby 失败不能拖垮采集"
+        p = PostRepo(db).get(11)
+        assert p.emby_status is None, "Emby 不可达时不应写入任何状态"
+
+
+# ---------------------------------------------------------------- cron 定时刷新
+
+
+class TestEmbyDelaySeconds:
+    """``emby_delay_seconds``：cron 驱动的下次触发间隔（镜像 RSS 模式）。"""
+
+    def test_empty_returns_default_interval(self):
+        """★ 空 cron = 保持现状：默认每 15 分钟一次（E-6 现行为不变）。"""
+        from bt169.api.app import EMBY_FALLBACK_SECONDS, emby_delay_seconds
+
+        assert emby_delay_seconds("") == EMBY_FALLBACK_SECONDS
+        assert emby_delay_seconds("   ") == EMBY_FALLBACK_SECONDS
+        assert emby_delay_seconds(None) == EMBY_FALLBACK_SECONDS
+
+    def test_invalid_falls_back(self):
+        """理论上存不进库（保存时已 400），但旧库/手改库不能弄死线程。"""
+        from bt169.api.app import EMBY_FALLBACK_SECONDS, emby_delay_seconds
+
+        assert emby_delay_seconds("nonsense") == EMBY_FALLBACK_SECONDS
+        assert emby_delay_seconds("60 * * * *") == EMBY_FALLBACK_SECONDS
+
+    def test_valid_returns_seconds_until_next(self):
+        from bt169.api.app import emby_delay_seconds
+
+        delay = emby_delay_seconds("*/30 * * * *")
+        assert 1.0 <= delay <= 30 * 60
+
+    def test_clamped_to_at_least_one_second(self):
+        """NTP 回拨防线：结果恒 ≥ 1 秒，防忙循环。"""
+        from bt169.api.app import emby_delay_seconds
+
+        assert emby_delay_seconds("* * * * *", wall=lambda: 0.0) >= 1.0
+
+
+class TestEmbySchedulerCron:
+    """装配：启用定时器时必须挂上 cron 闭包（每次触发重读 emby.cron）。"""
+
+    def test_scheduler_has_next_delay_when_enabled(self, db, box):
+        from bt169.api.app import create_app
+
+        app = create_app(db, box=box, ui_dir=None, emby_interval=9999)
+        sched = app.state.emby_scheduler
+        assert sched.next_delay is not None
+        # 空 cron → 默认间隔；填了 cron → 按 cron 算
+        assert sched.next_delay() == 15 * 60
+        SettingsRepo(db, box).put("emby.cron", "*/30 * * * *")
+        assert 1.0 <= sched.next_delay() <= 30 * 60
+
+    def test_scheduler_without_cron_field_still_interval_mode(self, db, box):
+        """未启用定时器（interval=0）时什么都不装——现状不变。"""
+        from bt169.api.app import create_app
+
+        app = create_app(db, box=box, ui_dir=None, emby_interval=0)
+        assert not hasattr(app.state, "emby_scheduler")

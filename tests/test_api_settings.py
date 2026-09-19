@@ -2,6 +2,7 @@
 import pytest
 
 from bt169.config import PLACEHOLDER
+from bt169.repo.settings import SettingsRepo
 
 
 def test_get_settings_empty(client):
@@ -116,6 +117,61 @@ def test_rss_url_without_fid_rejected(client):
     assert r.json()["error"]["code"] == "bad_rss_url"
 
 
+def test_rss_cron_is_saved(client, db, box):
+    r = client.put("/api/settings", json={
+        "section": "site", "values": {"rss_cron": "0 */2 * * *"},
+    })
+    assert r.status_code == 200
+    assert SettingsRepo(db, box).get("site.rss_cron") == "0 */2 * * *"
+
+
+def test_rss_cron_is_trimmed(client, db, box):
+    """多余空格不影响——归一后再落库，避免同一表达式出现多种写法。"""
+    client.put("/api/settings", json={
+        "section": "site", "values": {"rss_cron": "  0   */2  *  *  *  "},
+    })
+    assert SettingsRepo(db, box).get("site.rss_cron") == "0 */2 * * *"
+
+
+@pytest.mark.parametrize("bad", [
+    "* * * *",           # 4 字段
+    "60 * * * *",        # 分钟越界
+    "*/0 * * * *",       # 步长 0
+    "nonsense",          # 完全不是 cron
+    "0 0 1 1 1 1",       # 6 字段（不支持秒级）
+])
+def test_bad_rss_cron_rejected(client, db, bad):
+    """★ 非法表达式必须 400 且**不落库**。
+
+    保证「能存进去的表达式一定能跑」——否则定时器会在运行期炸，
+    而那时用户已经看不到保存报错了。
+    """
+    r = client.put("/api/settings", json={
+        "section": "site", "values": {"rss_cron": bad},
+    })
+    assert r.status_code == 400, bad
+    assert r.json()["error"]["code"] == "bad_cron"
+    row = db.read().execute(
+        "SELECT value FROM settings WHERE key='site.rss_cron'"
+    ).fetchone()
+    assert row is None, f"非法表达式竟然落库了：{bad!r}"
+
+
+def test_empty_rss_cron_deletes(client, db, box):
+    """★ 空字符串 = 关闭自动检查，且**删掉键**而不是存空值。"""
+    sr = SettingsRepo(db, box)
+    client.put("/api/settings", json={
+        "section": "site", "values": {"rss_cron": "0 */2 * * *"},
+    })
+    assert sr.get("site.rss_cron") is not None
+
+    r = client.put("/api/settings", json={
+        "section": "site", "values": {"rss_cron": ""},
+    })
+    assert r.status_code == 200
+    assert sr.get("site.rss_cron") is None
+
+
 def test_unknown_section_rejected(client):
     r = client.put("/api/settings", json={"section": "nope", "values": {"a": "b"}})
     assert r.status_code == 400
@@ -174,3 +230,55 @@ def test_same_field_name_in_two_sections_does_not_collide(client, db, box):
     got = client.get("/api/settings").json()
     assert got["site"]["password"] == PLACEHOLDER
     assert got["proxy"]["password"] == PLACEHOLDER
+
+
+# ---------------------------------------------------------------- emby.cron
+
+
+def test_emby_cron_is_saved(client, db, box):
+    r = client.put("/api/settings", json={
+        "section": "emby", "values": {"cron": "*/30 * * * *"},
+    })
+    assert r.status_code == 200
+    assert SettingsRepo(db, box).get("emby.cron") == "*/30 * * * *"
+
+
+def test_emby_cron_is_trimmed(client, db, box):
+    """与 rss_cron 同一归一规则：多余空格折叠。"""
+    client.put("/api/settings", json={
+        "section": "emby", "values": {"cron": "  */30   *  *  *  *  "},
+    })
+    assert SettingsRepo(db, box).get("emby.cron") == "*/30 * * * *"
+
+
+@pytest.mark.parametrize("bad", [
+    "* * * *",           # 4 字段
+    "60 * * * *",        # 分钟越界
+    "nonsense",
+])
+def test_bad_emby_cron_rejected(client, db, bad):
+    """非法表达式 400 且不落库（与 rss_cron 同一保证）。"""
+    r = client.put("/api/settings", json={
+        "section": "emby", "values": {"cron": bad},
+    })
+    assert r.status_code == 400, bad
+    assert r.json()["error"]["code"] == "bad_cron"
+    row = db.read().execute(
+        "SELECT value FROM settings WHERE key='emby.cron'"
+    ).fetchone()
+    assert row is None
+
+
+def test_empty_emby_cron_deletes(client, db, box):
+    """★ 空字符串 = 恢复默认间隔，且删掉键。"""
+    sr = SettingsRepo(db, box)
+    client.put("/api/settings", json={
+        "section": "emby", "values": {"cron": "*/30 * * * *"},
+    })
+    assert sr.get("emby.cron") is not None
+
+    r = client.put("/api/settings", json={
+        "section": "emby", "values": {"cron": ""},
+    })
+    assert r.status_code == 200
+    assert sr.get("emby.cron") is None

@@ -80,27 +80,32 @@ def seed(posts: PostRepo, tid: int = 101, *, ed2k: str | None = "ed2k://|file|a.
 
 
 def test_build_message_contains_code_and_ed2k():
-    """★ 消息必须带上番号与 ed2k——Bot 侧靠番号命名文件。"""
+    """★ 消息**只含 ed2k 链接**（用户指定：不要番号/演员等其他信息）。
+
+    Bot 侧（aria2 / qBittorrent 插件）按行提取链接，一行一条最稳。
+    """
     p = Post(tid=101, title="t", code="ABC-101", actress="某人",
              release_date="2026-09-17", size="7GB", cover_img=None,
              detail_img=None, cover_local=None, detail_local=None,
+             cover_orig=None, detail_orig=None,
              ed2k="ed2k://|file|a.mkv|1|AB|/", post_date="2026-09-14",
              post_time=None, status="done", retry_count=0, last_error=None,
              next_retry_at=None, tg_sent_at=None, emby_status=None,
              emby_item_id=None, emby_checked=None,
              created_at="", updated_at="")
     msg = build_message(p)
-    assert "ABC-101" in msg
-    assert "ed2k://|file|a.mkv|1|AB|/" in msg
-    # ★ ed2k 必须**独占一行**：Bot 侧解析器按行取链接，混在文字里会解析失败
-    assert "ed2k://|file|a.mkv|1|AB|/" in msg.split("\n")
+    assert msg == "ed2k://|file|a.mkv|1|AB|/"
+    # 不再携带任何头部信息
+    assert "ABC-101" not in msg
+    assert "某人" not in msg
 
 
 def test_build_message_without_ed2k_raises():
     """无 ed2k 的帖不该被转发（需求 T-5）。"""
     p = Post(tid=101, title="t", code="ABC-101", actress=None,
              release_date=None, size=None, cover_img=None, detail_img=None,
-             cover_local=None, detail_local=None, ed2k=None,
+             cover_local=None, detail_local=None, cover_orig=None,
+             detail_orig=None, ed2k=None,
              post_date="2026-09-14", post_time=None, status="pending",
              retry_count=0, last_error=None, next_retry_at=None,
              tg_sent_at=None, emby_status=None, emby_item_id=None,

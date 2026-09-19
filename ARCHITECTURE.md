@@ -419,6 +419,17 @@ class Post:
 调用方**完全不知道**：Cookie 怎么存、验证码怎么识别、感谢怎么触发、
 限速怎么加、镜像怎么切换。这些全在 `source` 内部。
 
+**POST 重定向（PRG）——实测事实（2026-09-19）**：
+
+- 感谢插件（`thanksplugin:thanks`）首次感谢后返回 **301**（而非 302）
+  跳回帖子页——Discuz `dheader()` 的历史行为，PRG 模式；
+  重复感谢则返回 200 提示页（「已感謝過了」，幂等）。
+- 因此 `ForumClient.post()` **默认跟随 3xx**（上限 5 跳防环，
+  跳登录页仍抛 `LoginRequired`）；曾因把 301 当错误，感谢在服务端
+  明明已成功、15 帖却被误标 failed。
+- inajax 接口（登录 POST）响应体即判定结果，不走 PRG——
+  调用时显式传 `follow_redirects=False` 保持严格。
+
 #### 5.1.1 会话管理（`session.py`）
 
 Cookie 持久化到 SQLite，进程重启不丢。启动时自动检测有效性：
@@ -720,7 +731,17 @@ class Collector:
      d. 每帖之间 sleep(2–5s 随机)
 4. 处理 failed 队列（next_retry_at <= now），指数退避
 5. 记录 Stats（新增 / 失败 / 耗时）
+6. 若有新增：触发 on_job_done 回调     ← 采完立即查 Emby（见 §5.4）
 ```
+
+**完成回调（`on_job_done`）**：
+
+- 收到**本次采到**的 tid 列表（跳过的不算）；全跳过则不触发。
+- **时序契约：回调返回之后任务才落 done**——前端轮询看到 done
+  就能保证 Emby 徽章已写入库。回调异常只记日志，不影响任务状态。
+- 取消 / 会话失效路径不触发（用户主动停或没采到东西，不必等
+  一次 Emby 往返）。
+- CLI 路径不接线（`bt169 collect` 无 Emby 需求，保持默认 None）。
 
 **退避策略**（C-7）：
 
@@ -739,15 +760,43 @@ backoff = min(base * 2 ** retry_count, 3600) * random.uniform(0.8, 1.2)
 **架构要点：浏览路径绝不调用 Emby。**
 
 ```
-Emby Syncer (每 15 分钟)
+Emby Syncer (定时器：emby.cron 或默认 15 分钟；或采集任务收尾时立即触发)
     │
     ├─ 拉取媒体库全部条目（IncludeItemTypes=Movie，只要 Name/Path/Id）
     ├─ 从条目名中提取番号 → 建索引 {code: item_id}
-    ├─ 批量匹配本地 posts.code
+    ├─ 批量匹配本地 posts.code（采集路径只匹配本次采到的 tid）
     └─ 写回 posts.emby_status / emby_item_id / emby_checked
 
 浏览请求 → 读 posts.emby_status（纯本地，永不阻塞）  ← E-7 失败降级
 ```
+
+**定时节奏（E-6）——与 RSS 轮询同一套 cron 机制**：
+
+- 设置页 Emby 分区新增 `emby.cron`（如 `*/30 * * * *`）；保存时
+  落库前 `parse_cron` 校验并归一，非法 → 400 `bad_cron`（与
+  `site.rss_cron` 同一规则，同一代码路径）。
+- `EmbyScheduler.next_delay` 闭包每次触发后重读 `emby.cron`——
+  改表达式**无需重启**（同 E-9 的模式）。
+- `emby_delay_seconds()`：空 → 默认 15 分钟（`EMBY_FALLBACK_SECONDS`，
+  即 E-6 现行为不变）；非法 → 默认 + 警告日志（旧库/手改库不能弄死
+  线程）；合法 → 距下次触发秒数，夹到 ≥ 1 s 防 NTP 回拨忙循环。
+- 与 RSS 空 cron 语义不同：RSS 空 = 醒来但不干活（抓论坛烧额度），
+  Emby 空 = 按默认节奏干活（同步只读本地 + 一次 Emby API）。
+
+**采集完成后的立即检查（手动 + RSS 两条路径共用）**：
+
+- `Collector.on_job_done` 回调（见 §5.3）在任务落 done **之前**触发，
+  携带本次采到的 tid；装配层（`routes/collect.py`）把它接到 Emby。
+- 回调用 `EmbySyncer(only_tids=…)` 只查本次采到的帖子——万帖库里
+  其余帖子刚被定时器查过，不必陪跑；新卡片的「已入库」角标
+  在采集结束的瞬间就出现，不等 15 分钟。
+- 「先查 Emby、后落 done」的时序契约：前端轮询看到 done 时徽章
+  必已写入库，不会出现「任务完成但角标缺席」的窗口。
+- 三条同步路径（手动刷新 / 定时器 / 采集回调）共用 `routes/emby.py`
+  的模块级 `_sync_lock`；锁被占用（正在同步）时采集回调直接跳过——
+  定时器稍后会覆盖，不排队。
+- 全程不抛异常：未配置 Emby → debug 日志；Emby 不可达 →
+  `SyncResult(error=…)`，采集任务状态不受影响（E-7）。
 
 #### 5.4.0 媒体库列表按用户过滤（E-8）
 
@@ -807,11 +856,36 @@ def extract_codes(name: str) -> set[str]:
 
 ### 5.5 `telegram` —— ed2k 转发
 
-```python
-class TelegramClient(Protocol):
-    def send_message(self, chat_id: str, text: str) -> int: ...
-    def test(self) -> None: ...
+**传输层（2026-09 起）：MTProto（用户账号）。** 探针实测：Bot API 对
+「bot 发消息给另一 bot」直接返回 `400 USER_BOT_TO_BOT_DISABLED`
+（NS Bot 未开 Bot-to-Bot 模式，且该开关在对方服务手里），Bot 路径对
+NS Bot 不可达。因此转发链路改用 Telethon 用户账号发送——与用户手动
+发送同构，对方服务必然按真人消息处理。
+
 ```
+传输层统一契约（duck typing）：
+  send(text) -> message_id        # MtpSender（Telethon）与 TelegramClient（Bot API）同构
+  test() -> None                  # 设置页「测试」按钮
+
+业务层 telegram.py（不变）：forward_post / forward_many
+  —— 幂等（tg_sent_at）、串行 + 3s 间隔、FloodWait/429 停手
+```
+
+登录向导（`tglogin.py`）：三步状态机 `start(phone)→verify(code)→[password]`，
+进程内单例、5 分钟超时、临时客户端与转发长连接隔离。**发码冷却（用户要求）**：
+`start` 无论成败 30 秒内再点 → 429（剩余秒数透传前端禁用按钮）——发码是
+Telegram 严格限频操作，反复触发会让 FLOOD_WAIT 越拉越长。端点：
+`POST /api/tg/login/{start,verify,password,cancel}`；验证码错/密码错 → 422 结构化
+code（`tg_code_invalid`/`tg_password_invalid`），状态保留可重试。
+
+凭据（`tg.api_id` / `tg.api_hash` / `tg.session` / `tg.target`）：
+`api_hash` 与 StringSession **等于账号本身**，均走 SecretBox 加密落库
+（键名最后一段 `api_hash`/`session` 已入 `SECRET_FIELDS`）。登录用
+一次性 CLI `bt169 tg-login`（交互式手机号/验证码），Web 进程不做交互登录。
+`get_sender()` 是进程内单例：凭据签名不变即复用长连接。
+
+Bot API 客户端（`TelegramClient`）保留，仅用于**通知推送**
+（设置页测试按钮的 Bot 通道）；转发不再走它。
 
 #### 5.5.1 `sendMessage` vs `forwardMessage` —— 澄清需求 §8.9
 
@@ -1092,7 +1166,11 @@ APScheduler (15min) 或 POST /api/emby/refresh
 | GET | `/api/settings` | — | 密钥**脱敏** | S-1~S-9 |
 | PUT | `/api/settings` | `{section, values}` | `200` | S-5 |
 | POST | `/api/settings/test/emby` | — | `{ok, detail}` | — |
-| POST | `/api/settings/test/telegram` | — | `{ok, detail}` | — |
+| POST | `/api/settings/test/telegram` | — | `{ok, detail, channels:{mtp:{ok,detail}, bot:{ok,detail}}}` | 双通道独立报告 |
+| POST | `/api/tg/login/start` | `{phone}` | `{ok}` | 冷却期内 429 + `retry_after` |
+| POST | `/api/tg/login/verify` | `{code}` | `{ok}` 或 `{need_password}` | 验证码错 422 `tg_code_invalid` |
+| POST | `/api/tg/login/password` | `{password}` | `{ok}` | 密码错 422 `tg_password_invalid` |
+| POST | `/api/tg/login/cancel` | — | `{ok}` | 断开临时客户端 |
 | POST | `/api/auth/login` | `{password}` | `Set-Cookie` | S-6 |
 | POST | `/api/auth/logout` | — | `204` | S-6 |
 | GET | `/api/auth/me` | — | `{authenticated}` | S-6 |

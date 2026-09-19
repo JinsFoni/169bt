@@ -235,3 +235,58 @@ def test_post_not_rate_limited_by_default():
     fc = ForumClient(client=inner, limiter=limiter)
     fc.post("plugin.php?id=thanksplugin:thanks", data={"tid": "1"})
     assert slept == []
+
+
+# ------------------------------------------------- POST 重定向（PRG）
+
+
+def test_post_follows_301_like_browser():
+    """★ 感谢插件实测:首次感谢后发 **301** 跳回帖子页（PRG 模式）。
+
+    浏览器会静默跟随;曾因把 301 当错误,感谢在服务端已成功、
+    帖子却被误标 failed(2026-09-19,15 帖全军覆没)。
+    """
+    def handler(req):
+        if req.method == "POST":
+            return httpx.Response(
+                301, headers={"location": "/forum.php?mod=viewthread&tid=1"})
+        return httpx.Response(200, text="unlocked")
+
+    fc = make_client(handler)
+    page = fc.post("plugin.php?id=thanksplugin:thanks&action=thanks",
+                   data={"tid": "1"})
+    assert page.status == 200
+    assert page.text == "unlocked"
+
+
+def test_post_redirect_to_login_raises_login_required():
+    """POST 重定向到登录页 = 会话失效,与 GET 同一套识别。"""
+    def handler(req):
+        return httpx.Response(
+            302, headers={"location": "member.php?mod=logging&action=login"})
+
+    fc = make_client(handler)
+    with pytest.raises(LoginRequired, match="会话失效"):
+        fc.post("plugin.php?id=thanksplugin:thanks", data={"tid": "1"})
+
+
+def test_post_redirect_loop_raises():
+    """重定向环 → 明确报错,不无限跟随。"""
+    def handler(req):
+        return httpx.Response(
+            301, headers={"location": "/plugin.php?id=thanksplugin:thanks"})
+
+    fc = make_client(handler)
+    with pytest.raises(FetchError, match="超限"):
+        fc.post("plugin.php?id=thanksplugin:thanks", data={"tid": "1"})
+
+
+def test_post_strict_mode_keeps_non200_error():
+    """follow_redirects=False（login inajax 用）:非 200 依旧报错。"""
+    def handler(req):
+        return httpx.Response(301, headers={"location": "/elsewhere/"})
+
+    fc = make_client(handler)
+    with pytest.raises(FetchError, match="重定向"):
+        fc.post("member.php?mod=logging&action=login", data={},
+                follow_redirects=False)

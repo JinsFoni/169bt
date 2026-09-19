@@ -266,6 +266,13 @@ class EmbySyncer:
     client: EmbyClient
     posts_repo: Any
     clock: Any = field(default=None)  # 注入用；None → 用 repo 的 now_iso
+    #: 只检查这些 tid（``None`` = 全库）。
+    #:
+    #: 供「采集完成后立即检查入库状态」用：刚采完的帖子是用户正盯着的
+    #: 卡片，等 15 分钟定时器不如马上查；而库里其余 1 万帖刚查过，
+    #: 不需要陪着重跑。过滤而非另写一条链路：匹配、写库、错误处理
+    #: 与全量同步完全同一套，不会漂移。
+    only_tids: list[int] | None = None
 
     def sync(self) -> SyncResult:
         """拉媒体库 → 匹配 → 写回。失败时返回带 ``error`` 的结果。"""
@@ -282,19 +289,30 @@ class EmbySyncer:
         idx = index_items(rows)
         result = SyncResult(library_items=len(rows))
 
-        for post in self.posts_repo.all_posts():
+        # ★ 过滤发生在拉取**之后**：媒体库列表只需要拉一次，过滤的是
+        #   本地拿哪些帖子去匹配。only_tids 里的 tid 若已不存在，
+        #   在 list_by_tids 里被自然跳过，不影响其余。
+        posts = (self.posts_repo.list_by_tids(self.only_tids)
+                 if self.only_tids is not None
+                 else self.posts_repo.all_posts())
+
+        results: list[tuple[int, bool, str | None]] = []
+        for post in posts:
             if not post.code:
                 continue
             item_id = idx.get(post.code.upper())
-            self.posts_repo.set_emby(
-                post.tid,
-                in_library=item_id is not None,
-                item_id=item_id,
-                checked_at=checked_at,
-            )
+            results.append((post.tid, item_id is not None, item_id))
             result.checked += 1
             if item_id is not None:
                 result.in_library += 1
+
+        # ★ 一把事务写回（分批防 IN 占位符上限——与 list_by_tids 同源）。
+        #   逐帖 UPDATE 在万帖全量同步时是万次锁往返，无谓地拉长
+        #   「checked_at 到结果可见」的窗口。
+        CHUNK = 500
+        for i in range(0, len(results), CHUNK):
+            self.posts_repo.set_emby_many(
+                results[i:i + CHUNK], checked_at=checked_at)
 
         log.info(
             "Emby 同步完成：库内 %s 条，检查 %s 帖，命中 %s",
@@ -332,6 +350,10 @@ class EmbyScheduler:
     clock: Any = None            # time.monotonic；注入用于测试
     delay_first: bool = False    # True → 首次 tick 推迟一个 interval
     name: str = "emby-sync"      # 线程名（日志/调试用）
+    #: 可选：算出「距下次该跑还有多少秒」。给了它就**忽略** ``interval``
+    #: 与 ``delay_first``——RSS 订阅检查用 cron 表达式驱动（E-9）。
+    #: 返回 ``None`` 表示表达式不可达 → 循环退出，不空转。
+    next_delay: Any = None       # Callable[[], float | None] | None
 
     def __post_init__(self) -> None:
         import threading
@@ -365,6 +387,18 @@ class EmbyScheduler:
         """循环直到 ``stop_event`` 被设置。"""
         first = True
         while not self.stop_event.is_set():
+            # ★ cron 驱动：每次都由 ``next_delay`` 算下一个时刻，
+            #   与 ``interval`` / ``delay_first`` 互斥。
+            if self.next_delay is not None:
+                delay = self.next_delay()
+                if delay is None:
+                    # 表达式不可达（如 2 月 30 日）→ 没有下次，退出。
+                    return
+                if not self._wait_until(self.clock() + delay):
+                    return
+                self.tick()
+                continue
+
             if first and self.delay_first:
                 # ★ 先睡满一个 interval 再首次 tick（见类文档）
                 first = False

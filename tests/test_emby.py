@@ -18,6 +18,7 @@ from bt169.emby import (
     SyncResult,
     index_items,
 )
+from bt169.repo.posts import PostRepo, now_iso
 
 
 class FakeHTTP:
@@ -63,8 +64,6 @@ def db(tmp_path):
 
 
 def seed(db, tid, code, date="2026-09-14"):
-    from bt169.repo.posts import now_iso
-
     with db.write() as c:
         c.execute(
             "INSERT INTO posts(tid,title,code,actress,release_date,size,"
@@ -660,3 +659,177 @@ def test_resolve_user_id_empty_username_raises():
     with pytest.raises(EmbyError):
         c.resolve_user_id("")
     assert http.calls == []
+
+
+# --------------------------------------------------- next_delay（cron 驱动）
+
+
+class _FakeClock:
+    """可推进的假时钟。"""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class _FakeStop:
+    """假 stop_event。
+
+    ★ ``wait`` 会把假时钟推进 ``timeout``——因此**不需要真的睡眠**，
+      测试是确定性的（不受机器负载影响）。
+    """
+
+    def __init__(self, clock: _FakeClock) -> None:
+        self.clock = clock
+        self.flag = False
+
+    def is_set(self) -> bool:
+        return self.flag
+
+    def wait(self, timeout: float) -> bool:
+        self.clock.now += timeout
+        return self.flag
+
+
+def _tick_recorder(clock: _FakeClock, stop: _FakeStop, limit: int):
+    """返回 (syncer, 记录每次 tick 时刻的列表)。跑满 ``limit`` 次后停止。"""
+    stamps: list[float] = []
+
+    class S:
+        def sync(self):
+            stamps.append(clock.now)
+            if len(stamps) >= limit:
+                stop.flag = True
+            return SyncResult()
+
+    return S(), stamps
+
+
+def test_scheduler_next_delay_overrides_interval():
+    """★ 给了 ``next_delay`` 就忽略 ``interval``，用它算等待时长。
+
+    RSS 订阅检查由 cron 表达式驱动（E-9）：每次触发后算出下一个时刻，
+    而不是固定间隔。
+    """
+    clock = _FakeClock()
+    stop = _FakeStop(clock)
+    syncer, stamps = _tick_recorder(clock, stop, limit=3)
+
+    sch = EmbyScheduler(
+        build_syncer=lambda: syncer,
+        interval=999999,                     # 应被忽略
+        stop_event=stop,
+        clock=clock,
+        next_delay=lambda: 42.0,
+    )
+    sch.run()
+
+    assert len(stamps) == 3, stamps
+    # ★ 相邻两次 tick 的间隔必须都是 42——不是 999999，也不是别的。
+    gaps = [b - a for a, b in zip(stamps, stamps[1:])]
+    assert gaps == [42.0, 42.0], gaps
+
+
+def test_scheduler_next_delay_returning_none_stops():
+    """``next_delay`` 返回 None（表达式不可达）→ 立刻退出，不空转。"""
+    clock = _FakeClock()
+    stop = _FakeStop(clock)
+    syncer, stamps = _tick_recorder(clock, stop, limit=99)
+
+    sch = EmbyScheduler(
+        build_syncer=lambda: syncer, interval=60,
+        stop_event=stop, clock=clock,
+        next_delay=lambda: None,
+    )
+    sch.run()
+    assert stamps == [], "不可达表达式不该触发任何 tick"
+
+
+def test_scheduler_next_delay_ignores_delay_first():
+    """★ 与 ``delay_first`` 同时给时，用 ``next_delay``。
+
+    cron 语义下「首次推迟一个 interval」没有意义——首次就该等 cron
+    算出的时刻。
+    """
+    clock = _FakeClock()
+    stop = _FakeStop(clock)
+    syncer, stamps = _tick_recorder(clock, stop, limit=2)
+
+    sch = EmbyScheduler(
+        build_syncer=lambda: syncer, interval=60,
+        stop_event=stop, clock=clock,
+        delay_first=True, next_delay=lambda: 7.0,
+    )
+    sch.run()
+
+    # ★ 首次 tick 在 7.0（不是 60，也不是 0——delay_first 被忽略）
+    assert stamps == [7.0, 14.0], stamps
+
+
+def test_scheduler_next_delay_varying():
+    """每次调用可以返回不同值（cron 的常态：跨天时等待时长会变）。"""
+    clock = _FakeClock()
+    stop = _FakeStop(clock)
+    syncer, stamps = _tick_recorder(clock, stop, limit=4)
+
+    delays = iter([10.0, 20.0, 30.0, 40.0])
+    sch = EmbyScheduler(
+        build_syncer=lambda: syncer, interval=60,
+        stop_event=stop, clock=clock, next_delay=lambda: next(delays),
+    )
+    sch.run()
+    assert stamps == [10.0, 30.0, 60.0, 100.0], stamps
+
+
+# ------------------------------------------------- 只查指定 tid
+
+
+def test_sync_only_tids_limits_scope(db):
+    """★ only_tids：只检查指定帖子,其余帖子的状态**原封不动**。
+
+    这是「采集完成后立即检查」的关键性质——刚采完的 103 立刻拿
+    到标记,而库里其余 1 万帖不必陪着重查一遍。
+    """
+    seed(db, 101, "START-624")
+    seed(db, 102, "MIDA-737")
+    seed(db, 103, "COD-001")
+
+    s = syncer(db, FakeHTTP(body=items(("e1", "START-624"),
+                                       ("e2", "COD-001"))))
+    s.only_tids = [103]          # 模拟采集回调：只关心本次采到的
+    r = s.sync()
+
+    assert r.checked == 1 and r.in_library == 1
+    pr = PostRepo(db)
+    hit = pr.get(103)
+    assert hit.emby_status == "in_library" and hit.emby_item_id == "e2"
+    # 圈外的帖子完全没动：状态、核对时间都是「从未查过」
+    for tid in (101, 102):
+        p = pr.get(tid)
+        assert p.emby_status is None and p.emby_checked is None
+
+
+def test_sync_only_tids_unknown_tid_is_safe(db):
+    """only_tids 里的 tid 已不存在（被删/没采到）→ 安静跳过。"""
+    seed(db, 101, "START-624")
+    s = syncer(db, FakeHTTP(body=items(("e1", "START-624"))))
+    s.only_tids = [101, 99999]
+    r = s.sync()
+    assert r.ok and r.checked == 1
+    assert PostRepo(db).get(101).emby_status == "in_library"
+
+
+def test_set_emby_many_matches_set_emby(db):
+    """批量写与逐帖写最终状态一致（set_emby 已委托给 set_emby_many）。"""
+    seed(db, 101, "START-624")
+    seed(db, 102, "MIDA-737")
+    pr = PostRepo(db)
+    now = now_iso()
+    pr.set_emby_many(
+        [(101, True, "e1"), (102, False, None)], checked_at=now)
+    p1, p2 = pr.get(101), pr.get(102)
+    assert (p1.emby_status, p1.emby_item_id) == ("in_library", "e1")
+    assert (p2.emby_status, p2.emby_item_id) == ("none", None)
+    assert p1.emby_checked == p2.emby_checked == now

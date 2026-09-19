@@ -58,6 +58,31 @@ class PostRepo:
         ).fetchall()
         return [Post.from_row(r) for r in rows]
 
+    def list_by_tids(self, tids: list[int]) -> list[Post]:
+        """按 tid 批量取帖，**保持传入顺序**，不存在的 tid 直接跳过。
+
+        供「采集完成后立即检查入库状态」用：只查本次采到的帖子，
+        而不是全库重跑一遍（万帖规模下全表重写是纯浪费）。
+
+        SQLite 的 ``IN`` 占位符有数量上限（默认 999），分批查——
+        每批 500，留足余量；一批最多也就 50 帖（日发帖峰值），
+        这只是防御性上限，不是现实规模。
+        """
+        if not tids:
+            return []
+        by_tid: dict[int, Post] = {}
+        CHUNK = 500
+        for i in range(0, len(tids), CHUNK):
+            chunk = tids[i:i + CHUNK]
+            ph = ",".join("?" * len(chunk))
+            rows = self._db.read().execute(
+                f"SELECT * FROM posts WHERE tid IN ({ph})", chunk,
+            ).fetchall()
+            for r in rows:
+                p = Post.from_row(r)
+                by_tid[p.tid] = p
+        return [by_tid[t] for t in tids if t in by_tid]
+
     def exists(self, tid: int) -> bool:
         """tid 是否已入库（**任意状态**）。
 
@@ -127,6 +152,8 @@ class PostRepo:
         status: str,
         cover_local: str | None = None,
         detail_local: str | None = None,
+        cover_orig: str | None = None,
+        detail_orig: str | None = None,
     ) -> None:
         """写入一条采集结果。
 
@@ -144,9 +171,10 @@ class PostRepo:
         with self._db.write() as conn:
             conn.execute(
                 "INSERT INTO posts(tid, title, code, actress, release_date, size,"
-                " cover_img, detail_img, cover_local, detail_local, ed2k,"
+                " cover_img, detail_img, cover_local, detail_local,"
+                " cover_orig, detail_orig, ed2k,"
                 " post_date, status, retry_count, created_at, updated_at)"
-                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?)"
                 " ON CONFLICT(tid) DO UPDATE SET"
                 " title=excluded.title, code=excluded.code,"
                 " actress=excluded.actress, release_date=excluded.release_date,"
@@ -154,25 +182,34 @@ class PostRepo:
                 " detail_img=excluded.detail_img,"
                 " cover_local=COALESCE(excluded.cover_local, posts.cover_local),"
                 " detail_local=COALESCE(excluded.detail_local, posts.detail_local),"
+                " cover_orig=COALESCE(excluded.cover_orig, posts.cover_orig),"
+                " detail_orig=COALESCE(excluded.detail_orig, posts.detail_orig),"
                 " ed2k=excluded.ed2k,"
                 " post_date=excluded.post_date, status=excluded.status,"
                 " last_error=NULL, next_retry_at=NULL, updated_at=excluded.updated_at",
                 (
                     tid, title, code, actress, release_date, size, cover_img,
-                    detail_img, cover_local, detail_local, ed2k, post_date,
-                    status, now, now,
+                    detail_img, cover_local, detail_local, cover_orig,
+                    detail_orig, ed2k, post_date, status, now, now,
                 ),
             )
 
-    def set_local_image(self, tid: int, field: str, local_url: str) -> None:
+    def set_local_image(self, tid: int, column: str, local_url: str) -> None:
         """只更新一个本地图路径（补图用，不动其余字段）。
 
-        ``field`` 只接受 ``"cover"`` / ``"detail"``——白名单而非字符串拼接，
-        避免把列名当 SQL 拼（虽然调用方是内部代码，但拼错会静默写错列）。
+        ``column`` 是**真实列名**（``cover_local`` / ``detail_local`` /
+        ``cover_orig`` / ``detail_orig``），与 ``FIELD_TARGETS`` 里写的
+        名字一致——两边同源才不会漂移。**白名单而非字符串拼接**：
+        拼错列名会静默写错列。
         """
-        col = {"cover": "cover_local", "detail": "detail_local"}.get(field)
+        col = {
+            "cover_local": "cover_local",
+            "detail_local": "detail_local",
+            "cover_orig": "cover_orig",
+            "detail_orig": "detail_orig",
+        }.get(column)
         if col is None:
-            raise ValueError(f"未知图片字段：{field}")
+            raise ValueError(f"未知图片列：{column}")
         with self._db.write() as conn:
             conn.execute(
                 f"UPDATE posts SET {col}=?, updated_at=? WHERE tid=?",
@@ -193,11 +230,31 @@ class PostRepo:
         return bool(row["c"])
 
     def missing_local_images(self) -> list[int]:
-        """有图但未本地化的 tid（供 ``169bt doctor`` 统计覆盖率）。"""
+        """有图但未本地化的 tid（供 ``169bt doctor`` 统计覆盖率）。
+
+        ★ 含原图档：灯箱要它才能显示原图，缺了就是「功能没完成」。
+        """
         rows = self._db.read().execute(
             "SELECT tid FROM posts"
             " WHERE (cover_img IS NOT NULL AND cover_local IS NULL)"
             "    OR (detail_img IS NOT NULL AND detail_local IS NULL)"
+            "    OR (cover_img IS NOT NULL AND cover_orig IS NULL)"
+            "    OR (detail_img IS NOT NULL AND detail_orig IS NULL)"
+        ).fetchall()
+        return [r["tid"] for r in rows]
+
+    def missing_original_images(self) -> list[int]:
+        """缺**原图档**的 tid（供 ``169bt doctor`` 提示重跑采集）。
+
+        ★ 单独一个方法而不是并进 ``missing_local_images``：两者的
+        严重程度不同。缩略图缺失 → 前端裂图（必须修）；原图档缺失 →
+        灯箱显示得糊一些（可以慢慢补，老帖子本来就还没采过）。
+        混在一起会让 doctor 天天报一堆「失败」。
+        """
+        rows = self._db.read().execute(
+            "SELECT tid FROM posts"
+            " WHERE (cover_img IS NOT NULL AND cover_orig IS NULL)"
+            "    OR (detail_img IS NOT NULL AND detail_orig IS NULL)"
         ).fetchall()
         return [r["tid"] for r in rows]
 
@@ -257,17 +314,43 @@ class PostRepo:
         checked_at: str,
     ) -> None:
         """记录 Emby 查询结果（缓存，避免每次浏览都打 Emby）。"""
+        self.set_emby_many(
+            [(tid, in_library, item_id)], checked_at=checked_at)
+
+    def set_emby_many(
+        self,
+        results: list[tuple[int, bool, str | None]],
+        *,
+        checked_at: str,
+    ) -> None:
+        """批量记录 Emby 查询结果。
+
+        ``results`` 是 ``(tid, in_library, item_id)`` 三元组。与逐条
+        ``set_emby`` 的区别**不只是省 SQL**：写走单例连接 + 全局锁
+        （见 ``db.write``），万帖全量同步逐条写 = 万次锁往返；
+        一把事务写完，无论 5 帖还是 1 万帖都是一次提交。
+
+        **必须单事务**：检查时刻 ``checked_at`` 是「本次媒体库快照的
+        生成时间」，分多次提交的话，读到一半的观测者会看到同一快照
+        里的帖子带着不同的检查时间。
+        """
+        if not results:
+            return
+        ts = now_iso()
         with self._db.write() as conn:
-            conn.execute(
+            conn.executemany(
                 "UPDATE posts SET emby_status=?, emby_item_id=?, emby_checked=?,"
                 " updated_at=? WHERE tid=?",
-                (
-                    "in_library" if in_library else "none",
-                    item_id if in_library else None,
-                    checked_at,
-                    now_iso(),
-                    tid,
-                ),
+                [
+                    (
+                        "in_library" if in_lib else "none",
+                        item_id if in_lib else None,
+                        checked_at,
+                        ts,
+                        tid,
+                    )
+                    for tid, in_lib, item_id in results
+                ],
             )
 
     def mark_tg_sent(self, tid: int, when: str) -> None:

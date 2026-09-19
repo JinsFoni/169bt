@@ -19,6 +19,7 @@ from bt169.config import (
 from bt169.crypto import hash_password
 from bt169.db import Database
 from bt169.repo.settings import SettingsRepo
+from bt169.source.cron import CronError, parse_cron
 
 router = APIRouter(tags=["settings"])
 
@@ -85,6 +86,19 @@ def write_settings(
                 raise HTTPException(
                     status_code=400,
                     detail={"code": "bad_rss_url", "message": str(exc)},
+                ) from exc
+        # ★ cron 表达式必须在**落库前**校验：定时器在后台线程里跑，
+        #   非法表达式到那时才炸的话，用户已经看不到保存报错了。
+        #   校验后归一（多余空格折叠）——避免同一表达式出现多种写法。
+        #   rss_cron（RSS 轮询）与 emby.cron（入库状态定时刷新）同一规则。
+        if key in ("rss_cron", "cron") and value and patch.section in (
+                "site", "emby"):
+            try:
+                value = parse_cron(value).expression
+            except CronError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": "bad_cron", "message": str(exc)},
                 ) from exc
         # ★ 访问密码必须哈希后落库（S-6 / ADR-17）。
         #   漏掉这一步，门禁就退化成明文比对——而且明文会躺在库里。

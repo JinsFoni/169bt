@@ -65,6 +65,7 @@ def test_posts_contract_fields(client, seed):
         "tid", "title", "code", "actress", "release_date", "size",
         "cover", "detail", "ed2k", "post_date", "status", "emby_in_library",
         "tg_sent_at",          # T-7：已转发状态
+        "cover_orig", "detail_orig",  # ★ 灯箱原图档（回退到缩略图/源 URL）
     }
 
 

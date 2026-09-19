@@ -11,6 +11,8 @@ from PIL import Image
 from bt169.collector.imagecache import (
     CARD_WIDTH,
     LIGHTBOX_WIDTH,
+    ORIGINAL,
+    SIZES,
     ImageCache,
     ImageError,
 )
@@ -78,7 +80,7 @@ def test_ensure_downloads_and_converts(tmp_path):
 
     assert fetch.calls == ["https://img.example/big.jpg"]
     assert cached.bytes_in > 0
-    assert set(cached.variants) == {CARD_WIDTH, LIGHTBOX_WIDTH}
+    assert set(cached.variants) == {CARD_WIDTH, LIGHTBOX_WIDTH, ORIGINAL}
 
     with Image.open(c.path_for(cached.key, CARD_WIDTH)) as im:
         assert im.format == "WEBP"
@@ -92,6 +94,36 @@ def test_variant_url_shape(tmp_path):
     c, _ = make_cache(tmp_path, png(800, 600))
     cached = c.ensure("https://img.example/x.jpg")
     assert cached.variants[CARD_WIDTH] == f"/img/{cached.key[:2]}/{cached.key}-600.webp"
+
+
+def test_original_stores_source_bytes_verbatim(tmp_path):
+    """★ 原图档必须**原样存下载到的字节**（不转码、不缩放）。
+
+    源图已是有损 JPEG，再编码只会更差；灯箱要的是源图原样。
+    扩展名随源格式：PNG 源存 ``-orig.png``，JPEG 存 ``-orig.jpg``。
+    """
+    payload = png(2184, 1542)
+    c, _ = make_cache(tmp_path, payload)
+    cached = c.ensure("https://img.example/big.jpg")
+
+    orig = c.original_path(cached.key)
+    assert orig is not None and orig.name.endswith("-orig.png")
+    assert orig.read_bytes() == payload, "原图必须与源字节逐位一致"
+
+
+def test_original_matches_width_and_delete(tmp_path):
+    """matches_width 认得原图档；delete 三档全删。"""
+    from bt169.collector.imagecache import matches_width
+
+    c, _ = make_cache(tmp_path, png(800, 600))
+    url = "https://img.example/x.jpg"
+    cached = c.ensure(url)
+
+    assert matches_width(cached.variants[ORIGINAL], ORIGINAL)
+    assert not matches_width(cached.variants[CARD_WIDTH], ORIGINAL)
+
+    assert c.delete(url) == 3
+    assert c.original_path(cached.key) is None
 
 
 def test_second_ensure_makes_no_request(tmp_path):
@@ -117,8 +149,13 @@ def test_does_not_upscale_small_images(tmp_path):
         assert im.size == (300, 200)
 
 
-def test_compresses_significantly(tmp_path):
-    """真实照片才有压缩空间；纯色图不具代表性，这里只验能变小。"""
+def test_thumbnail_is_smaller_than_source(tmp_path):
+    """缩略档要真的省体积（真实照片才有压缩空间）。
+
+    ★ 断言对象是**缩略档文件本身**，不是 ``bytes_out`` 总和：
+    原图档是原样字节，总和必然 ≥ 输入，拿总和断言会得出
+    「没省体积」的错误结论。
+    """
     rng = __import__("random").Random(7)
     buf = io.BytesIO()
     # 生成有噪声的图（纯色 PNG 转 WebP 反而可能变大）
@@ -128,7 +165,8 @@ def test_compresses_significantly(tmp_path):
     img.save(buf, "PNG")
     c, _ = make_cache(tmp_path, buf.getvalue())
     cached = c.ensure("https://img.example/noise.jpg")
-    assert cached.bytes_out < cached.bytes_in
+    thumb = c.path_for(cached.key, CARD_WIDTH).stat().st_size
+    assert thumb < len(buf.getvalue())
 
 
 # ------------------------------------------------------------ 错误处理
@@ -241,7 +279,7 @@ def test_orphans_finds_unreferenced(tmp_path):
     c.ensure("https://img.example/drop.jpg")
 
     orphans = c.orphans({kept.key})
-    assert len(orphans) == 2                       # drop 的两个档位
+    assert len(orphans) == len(SIZES)               # drop 的全部档位
     assert all(o.stem.rsplit("-", 1)[0] != kept.key for o in orphans)
 
 
@@ -420,3 +458,101 @@ def test_ui_static_does_not_get_immutable_header(tmp_path, db, box):
         r = c.get("/index.html")
     assert r.status_code == 200
     assert "immutable" not in r.headers.get("cache-control", "")
+
+
+# ------------------------------------------------------------ 原图档（灯箱看原图）
+#
+# ★ 需求：点卡片后的大图要显示**原图**——即帖子里下载到的那张图，
+#   原样保存，**不转码、不缩放**。
+#
+#   为什么不能转成 WebP：
+#     - 源图本身就是有损 JPEG，再编码只能更差，不可能更好
+#     - 实测（源图 2184×1542 / 922.4 KB）：
+#         原样存 JPEG 字节      922.4 KB  PSNR ∞（零损失）
+#         有损 WebP q80         474.8 KB  PSNR 34.24 dB
+#         无损 WebP            3206.7 KB  PSNR ∞（但大 3.5 倍）
+#       省下的 447 KB 不值得引入一次额外有损编码。
+#
+#   实测背景：灯箱面板 1162 CSS px，图片显示 1129px，而 cover_local
+#   只有 600px → 放大 1.88×（DPR=2 时 3.8×）。卡片缩略图那档
+#   **本来就不该**进灯箱。
+
+
+def test_original_variant_keeps_source_resolution(tmp_path):
+    """★ 原图档必须是源图分辨率，一个像素都不缩。"""
+    c, _ = make_cache(tmp_path, png(2184, 1542))
+    cached = c.ensure("https://img.example/big.jpg")
+    assert ORIGINAL in cached.variants
+    with Image.open(c.path_for(cached.key, ORIGINAL, fmt="PNG")) as im:
+        assert im.size == (2184, 1542)
+
+
+def test_original_variant_not_upscaled(tmp_path):
+    """源图比目标小时原图档仍是源图尺寸（只缩不放）。"""
+    c, _ = make_cache(tmp_path, png(867, 1078))
+    cached = c.ensure("https://img.example/detail.jpg")
+    with Image.open(c.path_for(cached.key, ORIGINAL, fmt="PNG")) as im:
+        assert im.size == (867, 1078)
+
+
+def test_original_variant_is_byte_identical(tmp_path):
+    """★★ 原图档必须与下载到的字节**完全一致**（零转码）。
+
+    这是「显示原图」的硬要求：任何再编码都是画质损失。
+    """
+    payload = png(800, 600)
+    c, _ = make_cache(tmp_path, payload)
+    cached = c.ensure("https://img.example/x.jpg")
+    stored = c.path_for(cached.key, ORIGINAL, fmt="PNG").read_bytes()
+    assert stored == payload
+
+
+def test_original_variant_keeps_source_extension(tmp_path):
+    """★ 扩展名随源格式——JPEG 存成 .webp 会以错误的 Content-Type 分发。"""
+    c, _ = make_cache(tmp_path, png(800, 600))
+    cached = c.ensure("https://img.example/x.jpg")
+    assert cached.variants[ORIGINAL].endswith("-orig.png")
+
+
+def test_original_variant_generated_by_default(tmp_path):
+    """★ 默认就要生成原图档——否则又是「要用时没生成」。"""
+    c, _ = make_cache(tmp_path, png(800, 600))
+    assert ORIGINAL in SIZES
+
+
+def test_delete_removes_original_variant(tmp_path):
+    """★ 硬删除要连原图一起删，不能漏档位。"""
+    c, _ = make_cache(tmp_path, png(800, 600))
+    url = "https://img.example/x.jpg"
+    cached = c.ensure(url)
+    assert c.original_path(cached.key) is not None
+    removed = c.delete(url)
+    assert removed == len(cached.variants)
+    assert c.original_path(cached.key) is None
+
+
+def test_second_ensure_recognizes_existing_original(tmp_path):
+    """★ 原图档已存在时不该再下载（扩展名是 glob 出来的，不是猜的）。"""
+    c, fetch = make_cache(tmp_path, png(800, 600))
+    c.ensure("https://img.example/x.jpg")
+    c.ensure("https://img.example/x.jpg")
+    assert len(fetch.calls) == 1
+
+
+def test_original_variant_counts_toward_total_bytes(tmp_path):
+    """★ 原图档也是磁盘占用，统计不能漏（否则 doctor 少报）。"""
+    c, _ = make_cache(tmp_path, png(800, 600))
+    assert c.total_bytes() == 0
+    c.ensure("https://img.example/x.jpg")
+    payload = png(800, 600)
+    assert c.total_bytes() >= len(payload)
+
+
+def test_orphans_finds_original_variant(tmp_path):
+    """★ 孤儿清理要认出原图档（扩展名不是 .webp）。"""
+    c, _ = make_cache(tmp_path, png(800, 600))
+    cached = c.ensure("https://img.example/x.jpg")
+    orphans = c.orphans(set())
+    assert len(orphans) == len(SIZES)
+    assert any(p.suffix == ".png" for p in orphans)
+    assert c.orphans({cached.key}) == []

@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -23,6 +24,8 @@ from bt169.repo.settings import SettingsRepo
 from bt169.source.forum import ForumClient
 from bt169.source.session import SessionStore
 from bt169.source.thanks import ThanksClient
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/collect", tags=["collect"])
 
@@ -67,7 +70,55 @@ def build_runner(app: Any) -> CollectRunner:
     会话失效时的重登由 :class:`bt169.source.session` 的主动续期负责
     （见 ARCHITECTURE.md §5.2），不在这里抢额度。
     """
-    return CollectRunner(build_collector(app), CollectRepo(app.state.db))
+    runner = CollectRunner(build_collector(app), CollectRepo(app.state.db))
+    _install_job_done_hook(runner._collector, app)
+    return runner
+
+
+def _install_job_done_hook(collector: Collector, app: Any) -> None:
+    """把「采集完成 → 立即检查 Emby 入库状态」接到 collector 上。
+
+    ★ **挂回调而不是在 collector 里同步 Emby**：采集器不该知道 Emby
+    的存在（领域边界），装配层才知道「这台机器配了 Emby、用哪个库」。
+
+    ★ **走 app 级 ``_sync_lock`` 而不是自建一把**：手动刷新、定时器
+    （ ``EmbyScheduler.tick`` ）、采集回调三条路径可能同时到 Emby，
+    三把锁等于没锁；共用一把才真的串行。
+
+    ★ **只查本次采到的 tid**（``only_tids``）：刚采完的卡片用户正盯着，
+    立即查才有意义；全库刚被定时器查过，陪跑是浪费。
+    """
+    from bt169.api.routes.emby import build_client, get_sync_lock
+    from bt169.emby import EmbyNotConfigured, EmbySyncer
+    from bt169.repo.posts import PostRepo
+    from bt169.repo.settings import SettingsRepo
+
+    def on_job_done(tids: list[int]) -> None:
+        lock = get_sync_lock()
+        if not lock.acquire(blocking=False):
+            log.info("Emby 正在同步，跳过采集后的立即检查（%s 帖）", len(tids))
+            return
+        try:
+            syncer = EmbySyncer(
+                client=build_client(
+                    SettingsRepo(app.state.db, app.state.box)),
+                posts_repo=PostRepo(app.state.db),
+                only_tids=tids,
+            )
+            result = syncer.sync()
+            if result.error:
+                log.warning("采集后 Emby 检查失败：" + result.error)
+            elif result.checked:
+                log.info(
+                    "采集后 Emby 检查：检查 %s 帖，命中 %s",
+                    result.checked, result.in_library,
+                )
+        except EmbyNotConfigured as exc:
+            log.debug("采集后 Emby 检查跳过（未配置）：%s", exc)
+        finally:
+            lock.release()
+
+    collector.on_job_done = on_job_done
 
 
 def build_collector(app: Any) -> Collector:
@@ -111,9 +162,17 @@ def build_poller(app: Any) -> Any:
     _, clean = config.parse_rss_url(raw)     # 非法 URL 抛 ConfigError
 
     runner = getattr(app.state, "collect_runner", None)
+    # ★ fallback 单建的 collector 也要挂钩子（与 build_runner 同源），
+    #   否则 RSS 路径采完不触发 Emby 检查——两条路径必须行为一致。
+    #   且只建一次：钩子必须装在真正传给 RssPoller 的那个实例上。
+    if runner is not None:
+        collector = runner._collector
+    else:
+        collector = build_collector(app)
+        _install_job_done_hook(collector, app)
     return RssPoller(
         # ★ 复用 runner 的采集器：同一套限速器、同一份 Cookie。
-        collector=runner._collector if runner else build_collector(app),
+        collector=collector,
         posts=PostRepo(db),
         jobs=CollectRepo(db),
         feed=build_feed_client(app),

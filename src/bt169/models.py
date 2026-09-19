@@ -47,6 +47,8 @@ class Post:
     detail_img: str | None
     cover_local: str | None
     detail_local: str | None
+    cover_orig: str | None
+    detail_orig: str | None
     ed2k: str | None
     post_date: str
     post_time: str | None
@@ -95,6 +97,17 @@ class PostDTO:
     #: TG 转发时间（T-7）。★ 前端用它把按钮显示为「已发」——
     #: 不返回的话用户看不出哪条已经转发过，会重复点。
     tg_sent_at: str | None = None
+    #: ★ 灯箱用**原图**（点卡片后的大图）。
+    #:
+    #: ``cover``/``detail`` 是给**卡片缩略图**用的 600px 档；灯箱把图按
+    #: ~1129 CSS px 渲染，用 600px 那档等于放大 1.88×（DPR=2 时 3.8×）——
+    #: 实测这就是大图模糊的原因。
+    #:
+    #: 回退顺序：本地原图 → 本地缩略图 → 图床源 URL。
+    #: 回退而非置空：老帖子（迁移前采集的）还没有原图档，
+    #: 灯箱得能照常显示，只是清晰度差些。
+    cover_orig: str | None = None
+    detail_orig: str | None = None
 
     @classmethod
     def from_post(cls, post: Post, *, emby_in_library: bool = False) -> PostDTO:
@@ -116,6 +129,8 @@ class PostDTO:
             size=post.size,
             cover=post.cover_local or post.cover_img,
             detail=post.detail_local or post.detail_img,
+            cover_orig=post.cover_orig or post.cover_local or post.cover_img,
+            detail_orig=post.detail_orig or post.detail_local or post.detail_img,
             ed2k=post.ed2k,
             post_date=post.post_date,
             status=post.status,

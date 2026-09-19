@@ -65,7 +65,8 @@ class FakeForum:
         self.requests.append(path)
         return self._image
 
-    def post(self, path, *, data, headers=None, count_rate=False):  # type: ignore[no-untyped-def]
+    def post(self, path, *, data, headers=None, count_rate=False,
+             follow_redirects=True):  # type: ignore[no-untyped-def]
         self.posts.append((path, data))
         # ★ 只有**成功**响应才下发 auth cookie——Discuz 实际就是这样。
         #   替身无条件下发会让「以 cookie 判定成败」的逻辑永远成立，

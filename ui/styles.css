@@ -25,6 +25,7 @@
 
   /* 功能 */
   --danger: #E0574A;
+  --ok:     #4ADE80;   /* 已入库标记：亮绿，深底上对比度 ≥ 7:1 */
 
   /* 描边 / 玻璃 */
   --line:        rgba(255,255,255,.075);
@@ -303,25 +304,29 @@ body::before {
 
 /* ---------- Emby「已入库」标记（E-2/E-3）----------
    只在**已入库**时出现（未入库不显示任何标记，避免视觉噪声）。
-   背景用实色深底而非半透明：半透明叠在任意封面图上，对比度不可控。
-   --ink-900 底 + --cyan 字实测对比度见 ui/DESIGN.md。 */
+   位置：图片区**左下角**（用户指定，改掉早先的右上角）。
+   绿色（--ok）表「在库」语义；背景玻璃拟态（backdrop-filter 模糊）
+   叠在封面图上——模糊把底下杂乱的内容抹平，绿字对比度稳定，
+   不再依赖具体的封面明暗。 */
 .lib-badge {
   position: absolute;
-  top: 10px;
-  right: 10px;
+  bottom: 10px;
+  left: 10px;
   z-index: 2;
   display: inline-flex;
   align-items: center;
   gap: 4px;
   padding: 4px 9px 4px 7px;
   border-radius: var(--r-pill);
-  background: var(--ink-900);
-  color: var(--cyan);
+  background: rgba(18, 23, 34, .38);
+  backdrop-filter: blur(10px) saturate(1.3);
+  -webkit-backdrop-filter: blur(10px) saturate(1.3);
+  color: var(--ok);
   font-size: 11px;
   font-weight: 600;
   letter-spacing: .01em;
   line-height: 1.5;
-  box-shadow: 0 1px 6px rgba(0,0,0,.55);
+  box-shadow: 0 1px 6px rgba(0,0,0,.45);
   pointer-events: none;   /* 不挡住封面点击/悬浮 */
 }
 

@@ -641,8 +641,13 @@
     lbActress.textContent = p.actress;
 
     var figs = [];
-    if (p.cover)  figs.push({ src: p.cover,  cap: '封面图' });
-    if (p.detail) figs.push({ src: p.detail, cap: '详情图' });
+    // ★ 灯箱用**原图**（``cover_orig``/``detail_orig``，源图原样字节）。
+    //   早先用 ``p.cover``/``p.detail``（600px 缩略图档），而灯箱把图按
+    //   ~1129 CSS px 渲染 —— 600px 被放大 1.88×（DPR=2 时 3.8×），
+    //   实测这就是「点开大图是糊的」的原因。DTO 侧已做三级回退
+    //   （原图档 → 缩略图 → 图床源 URL），老帖子迁移前也能照常显示。
+    if (p.cover_orig)  figs.push({ src: p.cover_orig,  cap: '封面图' });
+    if (p.detail_orig) figs.push({ src: p.detail_orig, cap: '详情图' });
 
     lightboxBody.innerHTML = figs.length
       ? figs.map(function (f) {

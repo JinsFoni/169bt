@@ -522,3 +522,74 @@ def test_poll_endpoint_400_on_bad_rss_url(tmp_path):
         assert r.status_code == 400
         assert r.json()["error"]["code"] == "bad_rss_url"
     db.close()
+
+
+# ------------------------------------------------- cron 驱动的订阅检查（E-9）
+
+
+def test_poll_delay_falls_back_when_cron_empty():
+    """★ 没配 cron → 返回**兜底间隔**，而不是 ``None``。
+
+    为什么不能返回 ``None``（那样定时器会退出）：用户之后在设置页
+    填上表达式就**必须重启服务**才生效。本项目已确立「改了配置无需
+    重启」（每次 tick 重建 poller 就是这个理由）。
+
+    所以「何时醒来」与「是否干活」必须分开：
+    - 醒来间隔：空 cron → 兜底间隔（便宜：只读一次设置）
+    - 是否干活：由 ``_Adapter.sync`` 判断 cron 是否为空
+    """
+    from bt169.api.app import POLL_FALLBACK_SECONDS, poll_delay_seconds
+
+    assert poll_delay_seconds("", wall=lambda: 0.0) == POLL_FALLBACK_SECONDS
+    assert poll_delay_seconds("   ", wall=lambda: 0.0) == POLL_FALLBACK_SECONDS
+    assert poll_delay_seconds(None, wall=lambda: 0.0) == POLL_FALLBACK_SECONDS
+
+
+def test_poll_delay_falls_back_when_cron_invalid():
+    """非法表达式 → 兜底间隔 + 不抛（定时器是后台线程）。
+
+    理论上存不进库（保存时已 400），但库里可能是旧版本写进去的，
+    或用户手工改了库。定时器绝不能因此死掉。
+    """
+    from bt169.api.app import POLL_FALLBACK_SECONDS, poll_delay_seconds
+
+    assert poll_delay_seconds("nonsense", wall=lambda: 0.0) == \
+        POLL_FALLBACK_SECONDS
+    assert poll_delay_seconds("60 * * * *", wall=lambda: 0.0) == \
+        POLL_FALLBACK_SECONDS
+
+
+@pytest.mark.parametrize("expr,expected", [
+    # 北京时间 2026-09-19 10:30:00 == epoch 1789785000（实测）
+    ("0 */2 * * *", 5400.0),      # 下一个 12:00
+    ("* * * * *", 60.0),          # 下一个 10:31
+    ("0 2 * * *", 55800.0),       # 次日 02:00 = 15.5 小时
+    ("30 10 * * *", 86400.0),     # 今天的 10:30 已过 → 明天 10:30
+])
+def test_poll_delay_from_cron(expr, expected):
+    """★ 等待时长 = 下一个 cron 时刻 − 现在（秒）。"""
+    from bt169.api.app import poll_delay_seconds
+
+    got = poll_delay_seconds(expr, wall=lambda: 1789785000.0)
+    assert got == pytest.approx(expected, abs=1.0), f"{expr}: {got}"
+
+
+def test_poll_delay_never_below_one_second():
+    """★ 结果必须夹到 ≥ 1 秒，否则 NTP 回拨会引发忙循环。
+
+    真实触发条件：``now`` 落在命中时刻**前不足 1 秒**处。
+    ``* * * * *`` 在 10:30:59.5 时，下一个命中 10:31:00 只差 0.5 秒。
+    不夹的话返回 0.5，``_wait_until`` 几乎立刻返回 → 疯狂抓论坛。
+    """
+    from bt169.api.app import poll_delay_seconds
+
+    got = poll_delay_seconds("* * * * *", wall=lambda: 1789785059.5)
+    assert got == 1.0, got
+
+
+def test_poll_delay_no_sleep_when_far_from_minute():
+    """对照用例：不在边界时不该被夹（确认夹取只在必要时生效）。"""
+    from bt169.api.app import poll_delay_seconds
+
+    # 10:30:00 → 10:31:00 = 60 秒，远超下限
+    assert poll_delay_seconds("* * * * *", wall=lambda: 1789785000.0) == 60.0

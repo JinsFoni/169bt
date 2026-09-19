@@ -144,8 +144,14 @@
 
             <div class="field">
               <label class="field-label" for="siteRss">RSS 订阅链接</label>
-              <input class="input is-mono" id="siteRss" type="text" placeholder="https://169bt.com/rss.php?fid=192" autocomplete="off" spellcheck="false">
-              <p class="field-hint">仅作参考记录；实际采集走列表页与详情页。</p>
+              <input class="input is-mono" id="siteRss" type="text" placeholder="https://169bt.com/forum.php?mod=rss&amp;fid=192" autocomplete="off" spellcheck="false">
+              <p class="field-hint">用于发现新帖；ed2k 仍需逐帖抓详情页。</p>
+            </div>
+
+            <div class="field">
+              <label class="field-label" for="siteRssCron">订阅检查（cron）</label>
+              <input class="input is-mono" id="siteRssCron" type="text" placeholder="留空 = 不自动检查" autocomplete="off" spellcheck="false">
+              <p class="field-hint">5 字段 cron：分 时 日 月 周（如 <code>0 */2 * * *</code> = 每 2 小时）。按 UTC+8 解释。</p>
             </div>
 
             <div class="field-row">
@@ -291,6 +297,12 @@
                 <p class="field-hint" id="embyLibHint">留空 = 全部媒体库。</p>
               </div>
             </div>
+
+            <div class="field">
+              <label class="field-label" for="embyCron">定时刷新</label>
+              <input class="input is-mono" id="embyCron" type="text" placeholder="*/30 * * * *" autocomplete="off" spellcheck="false">
+              <p class="field-hint">Cron 表达式，定时刷新入库状态；留空 = 默认每 15 分钟。非法表达式保存时会报错。</p>
+            </div>
           </div>
 
           <footer class="pane-foot">
@@ -304,7 +316,61 @@
           <div class="pane-scroll">
             <div class="pane-head">
               <h3 class="pane-title">Telegram</h3>
-              <p class="pane-desc">采集异常与每日归档摘要推送。</p>
+              <p class="pane-desc">转发走 MTProto（用户账号）；Bot Token 仅用于通知推送。</p>
+            </div>
+
+            <div class="field-row">
+              <div class="field field-grow">
+                <label class="field-label" for="tgApiId">MTProto api_id</label>
+                <input class="input is-mono" id="tgApiId" type="text" placeholder="1234567" autocomplete="off" spellcheck="false">
+              </div>
+              <div class="field field-grow">
+                <label class="field-label" for="tgApiHash">MTProto api_hash</label>
+                <div class="input-wrap">
+                  <input class="input is-mono" id="tgApiHash" type="password" placeholder="0123456789abcdef0123456789abcdef" autocomplete="off" spellcheck="false">
+                  <button class="reveal" type="button" aria-label="显示 api_hash" aria-pressed="false" data-reveal="tgApiHash">
+                    <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2 10s3-5.4 8-5.4S18 10 18 10s-3 5.4-8 5.4S2 10 2 10Z"/><circle cx="10" cy="10" r="2.2"/></svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+            <p class="field-hint">在 <code class="mono">my.telegram.org</code> → API development tools 创建应用后获取。</p>
+
+            <div class="field">
+              <label class="field-label" for="tgTarget">转发目标</label>
+              <input class="input is-mono" id="tgTarget" type="text" placeholder="@nan_share_bot" autocomplete="off" spellcheck="false">
+              <p class="field-hint">ed2k 链接发送到此账号/群组（用户名或数字 ID）。</p>
+            </div>
+
+            <div class="field">
+              <label class="field-label">MTProto 登录状态</label>
+              <p class="field-hint" id="tgSessionState">未登录。</p>
+              <div id="tgLoginWizard" hidden>
+                <div class="field">
+                  <label class="field-label" for="tgLoginPhone">① 手机号（含国家码）</label>
+                  <div class="input-wrap">
+                    <input class="input is-mono" id="tgLoginPhone" type="tel" placeholder="+8613800000000" autocomplete="off" spellcheck="false">
+                    <button class="btn btn-ghost" type="button" id="tgSendCode">发送验证码</button>
+                  </div>
+                  <p class="field-hint" id="tgLoginHint">Telegram 将发送验证码到你的 TG 客户端。发送后需等待冷却（约 30 秒）才能重发。</p>
+                </div>
+                <div class="field" id="tgCodeRow" hidden>
+                  <label class="field-label" for="tgLoginCode">② 验证码</label>
+                  <div class="input-wrap">
+                    <input class="input is-mono" id="tgLoginCode" type="text" inputmode="numeric" placeholder="12345" autocomplete="off" spellcheck="false">
+                    <button class="btn btn-ghost" type="button" id="tgVerifyCode">验证</button>
+                  </div>
+                </div>
+                <div class="field" id="tgPasswordRow" hidden>
+                  <label class="field-label" for="tgLoginPassword">③ 两步验证密码</label>
+                  <div class="input-wrap">
+                    <input class="input is-mono" id="tgLoginPassword" type="password" placeholder="未设置两步验证不会出现此步" autocomplete="off">
+                    <button class="btn btn-ghost" type="button" id="tgSubmitPassword">完成</button>
+                  </div>
+                </div>
+                <button class="btn btn-ghost" type="button" id="tgLoginCancel">取消登录</button>
+              </div>
+              <button class="btn btn-ghost" type="button" id="tgLoginStartBtn">登录 Telegram</button>
             </div>
 
             <div class="field">
@@ -402,6 +468,7 @@
 
     <footer class="collect-foot">
       <button class="btn btn-ghost" id="collectPoll" type="button">检查新帖</button>
+      <button class="btn btn-ghost" id="collectBackground" type="button" hidden>转后台</button>
       <button class="btn btn-ghost" id="collectCancel" type="button" hidden>取消采集</button>
       <button class="btn btn-primary" id="collectStart" type="button">开始采集</button>
     </footer>

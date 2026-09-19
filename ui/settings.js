@@ -34,6 +34,7 @@
     // 每次打开都重新拉：面板关闭时未保存的改动本就作废，
     // 重新拉取才能反映后端真实状态（比如密钥的占位符）。
     load();
+    bindLoginWizard();
     // 焦点落在当前选中分区，而非第一个输入框（避免移动端键盘弹起）
     var current = navBtns.filter(function (b) { return b.getAttribute('aria-selected') === 'true'; })[0];
     (current || navBtns[0]).focus();
@@ -101,17 +102,21 @@
   /* ---------- 字段映射：分区 → [字段名, 输入框 id] ---------- */
 
   var FIELDS = {
-    site:  [['rss_url', 'siteRss'], ['username', 'siteUser'], ['password', 'sitePass']],
+    site:  [['rss_url', 'siteRss'], ['rss_cron', 'siteRssCron'],
+            ['username', 'siteUser'], ['password', 'sitePass']],
     basic: [['password', 'setPassword']],
     proxy: [['type', 'proxyType'], ['host', 'proxyHost'], ['port', 'proxyPort'],
             ['username', 'proxyUser'], ['password', 'proxyPass']],
     emby:  [['url', 'embyUrl'], ['api_key', 'embyKey'],
-            ['username', 'embyUser'], ['library', 'embyLib']],
-    tg:    [['token', 'tgToken'], ['chat_id', 'tgChat']]
+            ['username', 'embyUser'], ['library', 'embyLib'],
+            ['cron', 'embyCron']],
+    tg:    [['token', 'tgToken'], ['chat_id', 'tgChat'],
+            ['api_id', 'tgApiId'], ['api_hash', 'tgApiHash'],
+            ['target', 'tgTarget']]
   };
 
   /* 与后端 config.SECRET_FIELDS 对齐：这些字段后端只回占位符 */
-  var SECRET_FIELDS = ['password', 'token', 'apikey', 'api_key', 'secret'];
+  var SECRET_FIELDS = ['password', 'token', 'apikey', 'api_key', 'secret', 'api_hash', 'session'];
   var PLACEHOLDER = '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022';
 
   function isSecret(key) { return SECRET_FIELDS.indexOf(key) >= 0; }
@@ -127,6 +132,173 @@
         if (el && document.activeElement !== el) el.value = values[pair[0]] || '';
       });
     });
+    refreshSessionState(data && data.tg ? data.tg.session : '');
+  }
+
+  /* MTProto 登录状态提示：session 是密钥字段，后端只回占位符；
+     占位符非空即代表已登录。绝不上报 session 内容。 */
+  function refreshSessionState(sessionValue) {
+    var el = $('tgSessionState');
+    if (!el) return;
+    var logged = !!sessionValue;
+    el.innerHTML = logged
+      ? '已登录（session 已加密保存）。'
+      : '未登录。填好 api_id / api_hash 并保存后，点「登录 Telegram」。';
+    var startBtn = $('tgLoginStartBtn');
+    if (startBtn) startBtn.hidden = logged;
+    if (!logged) collapseWizard();
+  }
+
+  /* ---------- MTProto 登录向导（三步） ---------- */
+
+  var wizardBusy = false;
+
+  function collapseWizard() {
+    var wiz = $('tgLoginWizard');
+    if (wiz) wiz.hidden = true;
+    var rows = ['tgCodeRow', 'tgPasswordRow'];
+    rows.forEach(function (id) {
+      var el = $(id);
+      if (el) el.hidden = true;
+    });
+    var hint = $('tgLoginHint');
+    if (hint) hint.textContent =
+      'Telegram 将发送验证码到你的 TG 客户端。发送后需等待冷却才能重发。';
+  }
+
+  function wizardError(e, hintEl) {
+    var msg = (e && e.message) || '未知错误';
+    // 429 → 显示剩余等待秒数（后端 retry_after）
+    if (e && e.detail && e.detail.retry_after) {
+      msg = '操作太频繁，请 ' + e.detail.retry_after + ' 秒后再试';
+      // 同步禁用发送按钮
+      if (typeof e.detail.retry_after === 'number') {
+        startCooldown(e.detail.retry_after);
+      }
+    }
+    if (hintEl) hintEl.textContent = msg;
+    toast(msg, 'err', { duration: 6000 });
+  }
+
+  /* 冷却倒计时：禁用「发送验证码」按钮直到归零（用户要求的保护机制） */
+  var cooldownTimer = null;
+
+  function startCooldown(seconds) {
+    var btn = $('tgSendCode');
+    if (!btn) return;
+    if (cooldownTimer) clearInterval(cooldownTimer);
+    var left = seconds;
+    btn.disabled = true;
+    var phoneInput = $('tgLoginPhone');
+    function paint() {
+      btn.textContent = left > 0 ? '等待 ' + left + 's' : '发送验证码';
+      if (left <= 0) {
+        btn.disabled = false;
+        if (phoneInput) phoneInput.disabled = false;
+        clearInterval(cooldownTimer);
+        cooldownTimer = null;
+      }
+      left -= 1;
+    }
+    paint();
+    cooldownTimer = setInterval(paint, 1000);
+    // 冷却期间手机号也锁定,防止改号绕过视觉提示
+    if (phoneInput) phoneInput.disabled = true;
+  }
+
+  function bindLoginWizard() {
+    var startBtn = $('tgLoginStartBtn');
+    var sendBtn = $('tgSendCode');
+    var verifyBtn = $('tgVerifyCode');
+    var pwBtn = $('tgSubmitPassword');
+    var cancelBtn = $('tgLoginCancel');
+    var hint = $('tgLoginHint');
+    if (!startBtn || startBtn.dataset.bound) return;
+    startBtn.dataset.bound = '1';
+
+    startBtn.addEventListener('click', function () {
+      var wiz = $('tgLoginWizard');
+      if (wiz) wiz.hidden = false;
+      startBtn.hidden = true;
+    });
+
+    sendBtn.addEventListener('click', function () {
+      if (wizardBusy || sendBtn.disabled) return;
+      var phone = ($('tgLoginPhone') || {}).value || '';
+      if (!/\+?\d{6,}/.test(phone.trim())) {
+        hint.textContent = '请输入有效手机号（含国家码，如 +8613800000000）';
+        return;
+      }
+      wizardBusy = true;
+      sendBtn.disabled = true;
+      sendBtn.textContent = '发送中…';
+      window.api.tgLoginStart(phone.trim()).then(function () {
+        wizardBusy = false;
+        sendBtn.textContent = '发送验证码';
+        hint.textContent = '验证码已发送。请查看 Telegram 客户端/短信。';
+        $('tgCodeRow').hidden = false;
+        $('tgLoginCode').focus();
+        startCooldown(30);   // ★ 保护机制:发码后 30 秒冷却
+      }).catch(function (e) {
+        wizardBusy = false;
+        sendBtn.textContent = '发送验证码';
+        sendBtn.disabled = false;
+        wizardError(e, hint);
+      });
+    });
+
+    verifyBtn.addEventListener('click', function () {
+      if (wizardBusy) return;
+      var code = ($('tgLoginCode') || {}).value || '';
+      if (!code.trim()) { hint.textContent = '请输入验证码'; return; }
+      wizardBusy = true;
+      verifyBtn.disabled = true;
+      window.api.tgLoginVerify(code.trim()).then(function (res) {
+        wizardBusy = false;
+        verifyBtn.disabled = false;
+        if (res && res.need_password) {
+          hint.textContent = '已开启两步验证，请输入密码完成登录。';
+          $('tgPasswordRow').hidden = false;
+          $('tgLoginPassword').focus();
+          return;
+        }
+        finishLogin();
+      }).catch(function (e) {
+        wizardBusy = false;
+        verifyBtn.disabled = false;
+        wizardError(e, hint);
+      });
+    });
+
+    pwBtn.addEventListener('click', function () {
+      if (wizardBusy) return;
+      var pw = ($('tgLoginPassword') || {}).value || '';
+      wizardBusy = true;
+      pwBtn.disabled = true;
+      window.api.tgLoginPassword(pw).then(function () {
+        wizardBusy = false;
+        pwBtn.disabled = false;
+        finishLogin();
+      }).catch(function (e) {
+        wizardBusy = false;
+        pwBtn.disabled = false;
+        wizardError(e, hint);
+      });
+    });
+
+    cancelBtn.addEventListener('click', function () {
+      window.api.tgLoginCancel().catch(function () {}).then(function () {
+        collapseWizard();
+        var start = $('tgLoginStartBtn');
+        if (start) start.hidden = false;
+      });
+    });
+  }
+
+  function finishLogin() {
+    toast('Telegram 登录成功', 'ok', { duration: 3600 });
+    collapseWizard();
+    load();   // 重读设置 → 状态行变「已登录」、隐藏「登录」按钮
   }
 
   function load() {
@@ -302,13 +474,17 @@
     }).then(function (res) {
       btn.disabled = false;
       if (res && res.ok) {
-        setState('tg', '测试成功，请查看 Telegram', 'ok');
-        toast('测试消息已发送，请查看 Telegram', 'ok', { duration: 3600 });
+        setState('tg', 'MTProto 转发链路可用，请查看 Telegram', 'ok');
+        var botNote = res.channels && res.channels.bot && res.channels.bot.ok
+          ? '' : '（Bot 通知链路未配置或失败，不影响转发）';
+        toast('MTProto 测试消息已发送 ' + botNote, 'ok', { duration: 4200 });
       } else {
         var detail = (res && res.detail) || '未知原因';
         setState('tg', detail, 'err');
         toast('测试失败：' + detail, 'err', { duration: 6000 });
       }
+      // 测试后重读设置，刷新 MTProto 登录状态提示
+      load();
     }).catch(function (e) {
       btn.disabled = false;
       setState('tg', e.message, 'err');
