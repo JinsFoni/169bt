@@ -3,6 +3,40 @@ from bt169.__main__ import build_parser, main
 from bt169.crypto import SecretBox
 
 
+def test_serve_reload_uses_factory_string(monkeypatch, tmp_path):
+    """``--reload`` 必须把 import 字符串传给 uvicorn。
+
+    ★ uvicorn 收到 **app 对象** 时会静默忽略 ``reload=True``
+    （WARNING: You must pass the application as an import string …），
+    热重载从未生效过。reload 模式下子进程会重新 import ``bt169.__main__``，
+    所以工厂函数必须模块级、且延迟读取 ``config.*``（否则 monkeypatch 无效）。
+    """
+    captured: dict = {}
+
+    def fake_run(target, **kw):
+        captured["target"] = target
+        captured["kw"] = kw
+
+    monkeypatch.setattr("uvicorn.run", fake_run)
+    monkeypatch.setattr("bt169.config.DB_PATH", tmp_path / "x.db")
+    monkeypatch.setattr("bt169.config.DATA_DIR", tmp_path)
+    monkeypatch.setattr("bt169.config.IMAGE_DIR", tmp_path / "images")
+    rc = main(["serve", "--port", "8891", "--reload"])
+    assert rc == 0
+    # 必须是 import 字符串（模块级工厂），不是 app 对象
+    assert captured["target"] == "bt169.__main__:_serve_app"
+    assert captured["kw"]["reload"] is True
+    assert captured["kw"]["factory"] is True
+    assert captured["kw"]["port"] == 8891
+    # 字符串里的工厂必须真实可调用、且延迟读取 config（monkeypatch 后行为正确）
+    module, _, attr = captured["target"].partition(":")
+    import importlib
+    factory = getattr(importlib.import_module(module), attr)
+    app = factory()
+    assert app is not None
+    assert "FastAPI" in type(app).__name__
+
+
 def test_parser_has_subcommands():
     p = build_parser()
     ns = p.parse_args(["serve"])

@@ -107,13 +107,36 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     app = create_app(db, box=box, ui_dir=config.UI_DIR, emby_interval=-1)
     print(f"→ http://{args.host}:{args.port}")
     try:
-        uvicorn.run(
-            app, host=args.host, port=args.port,
-            reload=args.reload, log_level="info",
-        )
+        if args.reload:
+            # ★ uvicorn 只认 **import 字符串**（如 ``模块:工厂``）才能启用
+            #   reload/workers：传 app 对象会静默忽略 reload（仅打 WARNING）。
+            #   reload 模式下 uvicorn 会 spawn 子进程重新 import 本模块，
+            #   由 ``_serve_app`` 自行建库/取钥，主进程无需预先建好。
+            uvicorn.run(
+                "bt169.__main__:_serve_app", host=args.host, port=args.port,
+                reload=True, factory=True, log_level="info",
+            )
+        else:
+            uvicorn.run(
+                app, host=args.host, port=args.port,
+                log_level="info",
+            )
     finally:
         db.close()
     return 0
+
+
+def _serve_app():
+    """reload 模式的模块级应用工厂：每个 uvicorn 子进程独立装配。"""
+    import uvicorn  # noqa: F401 — 保持与 _cmd_serve 一致的导入时机
+
+    from bt169.api.app import create_app
+
+    db = Database(config.DB_PATH)
+    db.migrate()
+    box = _load_or_create_key()
+    # emby_interval=-1：启用定时同步，与 _cmd_serve 一致（E-6）
+    return create_app(db, box=box, ui_dir=config.UI_DIR, emby_interval=-1)
 
 
 def _cmd_login(args: argparse.Namespace) -> int:

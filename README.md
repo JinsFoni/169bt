@@ -3,6 +3,9 @@
 个人自用的 4K 帖归档与 ED2K 提取工具。后端 Python + FastAPI + SQLite，
 前端零构建原生 ESM。
 
+[![Release](https://img.shields.io/github/v/release/JinsFoni/169bt)](https://github.com/JinsFoni/169bt/releases)
+[![Docker Image](https://img.shields.io/badge/ghcr.io-jinsfoni%2F169bt-blue)](https://github.com/JinsFoni/169bt/pkgs/container/169bt)
+
 ## 快速开始
 
 ```bash
@@ -54,6 +57,15 @@ python3 -m venv .venv
 .venv/bin/pytest -v
 ```
 
+## 发布 / 更新
+
+- **版本发布**：在 GitHub 上创建 Release（tag 形如 `v1.0.0`）会自动触发
+  多架构 Docker 镜像构建并推送 GHCR，无需配置任何 secret。
+- **拉取镜像**：`docker pull ghcr.io/jinsfoni/169bt:latest`
+  （另提供 `:1.0.0` / `:1.0` 版本号 tag）。
+- **升级部署**：拉新镜像后 `docker compose up -d` 重建容器；数据库迁移
+  在启动时自动执行（幂等）。
+
 ## 文档
 
 | 文档 | 内容 |
@@ -66,8 +78,32 @@ python3 -m venv .venv
 
 ## 部署
 
-公网访问由 **Lucky 反代**负责 HTTPS。uvicorn 只监听 `127.0.0.1`，
-不要把它直接暴露到公网。
+### Docker（推荐）
+
+```bash
+docker compose up -d          # 构建 + 启动，数据落 ./data
+docker compose logs -f        # 跟日志
+docker compose down           # 停止（数据保留）
+```
+
+`compose.yml` 里的关键环境变量：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `PUID` / `PGID` | `1000` | 容器内运行身份。**改成宿主数据目录属主的 uid/gid**（`id -u` / `id -g`），启动时自动建用户、`chown /data` 后降权运行——bind mount 到 NAS 上任意属主的目录都能读写 |
+| `TZ` | `UTC` | 时区，影响归档日期归属；中国时区设 `Asia/Shanghai` |
+| `BT169_SECRET_KEY` | 自动生成 | 主密钥（base64 的 32 字节，`openssl rand -base64 32`）。固定它，换容器后已存密码才能继续解密 |
+
+用 GHCR 镜像：注释 `build: .`，改用 `image: ghcr.io/jinsfoni/169bt:latest`
+（镜像在发布 Release 时自动构建，纯 push 代码不会构建）。
+
+镜像以 root 启动、由 `docker/entrypoint.sh` 建用户后 `gosu` 降权——root 只存活到 exec 之前；
+若显式 `--user` 运行则 PUID/PGID 不生效，需自行保证数据目录可写。
+
+### 公网暴露
+
+公网访问由 **Lucky 反代**负责 HTTPS。uvicorn 只监听容器内 `0.0.0.0:8899`，
+不要把端口直接暴露到公网，务必过反代。
 
 反代必须注入 `X-Forwarded-Proto: https`，否则 PWA 的 Service Worker
 与 manifest 会因为非安全上下文而失败。

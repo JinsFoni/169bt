@@ -7,13 +7,17 @@
 
   /* ---------- 状态 ---------- */
 
-  var posts = [];            // 当前归档日的帖子（按需从后端取）
+  var posts = [];            // 当前归档日的帖子；★ 与 days[activeDate] 同一引用
+  var postsDate = null;      // posts 属于哪个日期（错误时判断能否保留旧画面）
   var dateList = [];         // 有帖的日期（升序：左旧右新）
   var counts = {};           // date → 帖子数
+  var days = {};             // date → 帖子缓存：切换日期不重取（见 loadPosts）
   var activeDate = null;     // 当前归档日期
   var deleted = [];          // 删除栈，支持撤销
   var pendingDelete = null;  // {tid, timer, entry} 等待 5 s 撤销窗口
   var loading = false;
+  var currentReq = 0;        // 取数竞态令牌：只有最新一次请求允许落地
+  var skeletonTimer = null;  // 延迟进入加载骨架（快请求不闪加载态）
 
   /* ---------- DOM ---------- */
 
@@ -40,14 +44,12 @@
   // 未配置时「下载」按钮禁用 + 提示去设置页，而不是发一个注定 400 的请求。
   var tgConfigured = false;
 
-  // ★ 两个独立的忙碌标志，不能共用一个：
-  //   - 单帖转发只该锁住那张卡片的按钮
-  //   - 批量转发只该锁住顶栏按钮
-  //   共用一个会让「转发一张卡片」把整个顶栏锁死。
-  //   而且**每个标志变化后必须重新 render()**——否则按钮会永远停在
-  //   禁用态（render 只在别处被调用时才会重算）。
-  var tgSendingOne = false;   // 单帖转发中
-  var tgSendingDay = false;   // 批量转发中
+  // ★ 单帖转发状态是**按 tid 记录**的（Set），不是全局布尔：
+  //   点某张卡的「下载」只该锁住那一张卡。曾用全局布尔 + 整页 render()，
+  //   结果是所有卡片一起显示「发送中」、整个网格重放入场动画（看起来像
+  //   整页刷新）。现在只原地更新目标按钮，其余卡片纹丝不动。
+  var tgSendingDay = false;   // 批量转发中（顶栏「下载本日」，全局唯一）
+  var tgSendingTids = {};     // tid → true，单帖转发中（ES5 环境用普通对象当 Set）
 
   /* ---------- 工具 ---------- */
 
@@ -251,25 +253,111 @@
     if (next) navTo(next);
   }
 
-  /* 取某日帖子并渲染。竞态保护：期间用户切了日期就丢弃这次结果 */
-  function loadPosts(date) {
-    loading = true;
-    render();
-    return window.api.getPosts(date).then(function (list) {
-      if (activeDate !== date) return;     // 已切走，丢弃
+  /* 进入加载骨架的延迟：比一次局域网取数慢得多，快请求完全无感 */
+  var SKELETON_DELAY = 180;
+
+  /**
+   * 取某日帖子并渲染。
+   *
+   * ★ 三层设计（2026-09「切换日期像整页刷新」的修复）：
+   *   1. **按日缓存**（days）：看过的日期切回来零请求零等待；
+   *      removePost/undoDelete 直接改的正是缓存数组（posts 与
+   *      days[activeDate] 同引用），天然一致。带 {force:true} 跳过
+   *      缓存（批量转发后同步 tg_sent_at 等服务端状态）。
+   *   2. **延迟骨架**：180ms 内返回（绝大多数情况）不进加载态，
+   *      旧内容原位保留；超时才弱化成骨架，绝不闪「正在加载…」。
+   *   3. **竞态令牌**（currentReq）：只有最新一次请求允许落地，
+   *      旧请求返回即丢弃。
+   */
+  function loadPosts(date, opts) {
+    var force = !!(opts && opts.force);
+    var cached = days[date];
+
+    // 缓存命中且非强制 → 不发请求、不进加载态：切换零等待
+    if (cached && !force) {
+      posts = cached;
+      postsDate = date;
       loading = false;
-      posts = list || [];
+      if (skeletonTimer) { clearTimeout(skeletonTimer); skeletonTimer = null; }
+      render();
+      return Promise.resolve();
+    }
+
+    var req = ++currentReq;
+    loading = true;
+    if (skeletonTimer) clearTimeout(skeletonTimer);
+    skeletonTimer = setTimeout(function () {
+      skeletonTimer = null;
+      if (activeDate === date) render();
+    }, SKELETON_DELAY);
+
+    return window.api.getPosts(date).then(function (list) {
+      if (activeDate !== date || req !== currentReq) return;   // 已切走/已被取代
+      loading = false;
+      if (skeletonTimer) { clearTimeout(skeletonTimer); skeletonTimer = null; }
+      posts = days[date] = (list || []);
+      postsDate = date;
       render();
     }).catch(function (e) {
-      if (activeDate !== date) return;
+      if (activeDate !== date || req !== currentReq) return;
       loading = false;
-      posts = [];
+      if (skeletonTimer) { clearTimeout(skeletonTimer); skeletonTimer = null; }
+      if (days[date]) {
+        posts = days[date];        // 刷新失败：保留旧数据，别让页面变空
+        postsDate = date;
+      } else if (postsDate !== date) {
+        posts = [];                // 屏上是别的日期的卡片 → 清空，防张冠李戴
+      }
+      // 否则（屏上本就是这日期的旧卡片，缓存已被清）：原样保留 + 报错，
+      // 绝不显示「这一天没有帖子」——那是在撒谎。
       render();
       toast('加载失败：' + e.message, 'err', { duration: 4600 });
     });
   }
 
+  /** 重新拉取当前日期（服务端状态可能已变：批量转发的 tg_sent_at 等）。 */
+  function refreshDay() {
+    if (!activeDate) return Promise.resolve();
+    return loadPosts(activeDate, { force: true });
+  }
+
   /* ---------- 渲染：卡片 ---------- */
+
+  /**
+   * 原地同步某张卡的「下载」按钮（发送中/已发/下载 + 禁用态 + 提示）。
+   *
+   * ★ 只改这一张卡的 DOM，**不调 render()**：render 会用 innerHTML 重建
+   *   整个网格，所有卡片重放 cardIn 入场动画、图片重新加载——这就是
+   *   「点一下下载、整页闪一遍」的由来。按钮文案与 cardHTML 中的
+   *   构造逻辑保持一致，两边改要同步改。
+   */
+  function syncCardButton(tid) {
+    var btn = grid.querySelector('.card[data-tid="' + tid + '"] .act-dl');
+    if (!btn) return;                       // 卡已不在（删了/切了日期）
+    var p = posts.filter(function (x) { return x.tid === tid; })[0];
+    if (!p) return;
+
+    var sending = !!tgSendingTids[tid];
+    var locked = !p.ed2k;
+    if (sending) {
+      btn.disabled = true;
+      btn.title = '正在转发…';
+    } else if (locked) {
+      btn.disabled = true;
+      btn.title = '尚未解锁 ED2K 链接';
+    } else {
+      btn.disabled = false;
+      btn.title = p.tg_sent_at
+        ? '已转发到 Telegram'
+        : (tgConfigured
+            ? '转发到 Telegram，由 Bot 侧下载'
+            : '尚未配置 Telegram，请先到设置页填写');
+    }
+    btn.textContent = '';
+    btn.insertAdjacentHTML('beforeend',
+      '<svg viewBox="0 0 20 20"><path d="M10 3.5v9m0 0 3.5-3.5M10 12.5 6.5 9M4 16.5h12"/></svg>' +
+      (sending ? '发送中' : (p.tg_sent_at ? '已发' : '下载')));
+  }
 
   function cardHTML(p, idx) {
     var locked = !p.ed2k;
@@ -277,7 +365,7 @@
     var title = cleanTitle(p);
 
     var media = p.cover
-      ? '<img src="' + esc(p.cover) + '" alt="" loading="lazy" data-img>'
+      ? '<img src="' + esc(p.cover) + '" alt="" loading="lazy" decoding="async" data-img>'
       : '';
 
     // E-2/E-3：已入库在**图片区右上角**显示标记；未入库**什么都不显示**。
@@ -326,7 +414,7 @@
             '<button class="act act-dl" type="button" data-act="dl"' +
               (locked
                 ? ' disabled title="尚未解锁 ED2K 链接"'
-                : (tgSendingOne
+                : (tgSendingTids[p.tid]
                     ? ' disabled title="正在转发…"'
                     : (p.tg_sent_at
                         ? ' title="已转发到 Telegram"'
@@ -334,7 +422,7 @@
                             ? ' title="转发到 Telegram，由 Bot 侧下载"'
                             : ' title="尚未配置 Telegram，请先到设置页填写"')))) + '>' +
               '<svg viewBox="0 0 20 20"><path d="M10 3.5v9m0 0 3.5-3.5M10 12.5 6.5 9M4 16.5h12"/></svg>' +
-              (tgSendingOne ? '发送中' : (p.tg_sent_at ? '已发' : '下载')) + '</button>' +
+              (tgSendingTids[p.tid] ? '发送中' : (p.tg_sent_at ? '已发' : '下载')) + '</button>' +
             '<button class="act act-del" type="button" data-act="del" title="删除这条记录" aria-label="删除">' +
               '<svg viewBox="0 0 20 20"><path d="M4 6.5h12M8.5 6.5V5a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v1.5M6 6.5l.7 8.4a1 1 0 0 0 1 .9h4.6a1 1 0 0 0 1-.9l.7-8.4"/></svg>' +
             '</button>' +
@@ -384,12 +472,20 @@
 
     /* 卡片 */
     if (loading) {
-      grid.innerHTML = '';
-      grid.hidden = true;
-      empty.hidden = false;
-      empty.querySelector('.empty-title').textContent = '正在加载…';
-      empty.querySelector('.empty-hint').textContent = '';
+      // ★ 延迟骨架（180ms）：快请求根本不会到这；慢请求时旧卡片原位保留，
+      //   只弱化出微光占位，绝不闪「正在加载…」（那才是「像刷新」的元凶）。
+      if (grid.children.length) {
+        grid.hidden = false;
+        empty.hidden = true;
+        grid.classList.add('is-refreshing');
+      } else {
+        grid.hidden = true;
+        empty.hidden = false;
+        empty.querySelector('.empty-title').textContent = '正在加载…';
+        empty.querySelector('.empty-hint').textContent = '';
+      }
     } else if (!list.length) {
+      grid.classList.remove('is-refreshing');
       grid.innerHTML = '';
       grid.hidden = true;
       empty.hidden = false;
@@ -400,6 +496,12 @@
     } else {
       empty.hidden = true;
       grid.hidden = false;
+      grid.classList.remove('is-refreshing');
+
+      // ★ 入场动画只在「真正的首次绘制」播放：切换日期（已有旧卡片在屏）
+      //   时硬切，不重放错落浮现——重放是「像整页刷新」的主要来源。
+      var firstPaint = grid.children.length === 0;
+      grid.classList.toggle('no-anim', !firstPaint);
       grid.innerHTML = list.map(cardHTML).join('');
 
       // 图片淡入
@@ -538,9 +640,10 @@
             { duration: 4000 });
       return;
     }
-    if (tgSendingOne) return;
-    tgSendingOne = true;
-    render();
+    if (tgSendingTids[p.tid]) return;      // 防重复点
+    // ★ 只置本帖状态 + 原地改按钮；不调 render()（会重建整个网格）。
+    tgSendingTids[p.tid] = true;
+    syncCardButton(p.tid);
 
     api.forward(p.tid).then(function () {
       toast('已转发 ' + p.code + ' 到 Telegram', 'ok', { duration: 2400 });
@@ -548,8 +651,8 @@
     }).catch(function (e) {
       toast(tgMessage(e, p.code), 'err', { duration: 4000 });
     }).then(function () {
-      tgSendingOne = false;
-      render();            // ★ 必须重算：否则按钮停在禁用态
+      delete tgSendingTids[p.tid];
+      syncCardButton(p.tid);   // ★ 必须重算：否则按钮停在禁用态
     });
   }
 
@@ -608,7 +711,7 @@
       if (r.failed && r.errors && r.errors.length) {
         console.warn('转发失败明细', r.errors);
       }
-      return refresh();
+      return refreshDay();     // 同步 tg_sent_at 等服务端状态（原误写 refresh()）
     }).catch(function (e) {
       toast(tgMessage(e, '当日'), 'err', { duration: 4500 });
     }).then(function () {
@@ -651,7 +754,7 @@
 
     lightboxBody.innerHTML = figs.length
       ? figs.map(function (f) {
-          return '<figure><img src="' + esc(f.src) + '" alt="">' +
+          return '<figure><img src="' + esc(f.src) + '" alt="" decoding="async">' +
                  '<figcaption>' + esc(f.cap) + '</figcaption></figure>';
         }).join('')
       : '<p class="empty-hint" style="padding:40px;text-align:center">这条记录没有图片</p>';
@@ -729,8 +832,9 @@
   window.reloadDates = function () {
     loadStatus();
     return loadDates().then(function () {
+      days = {};                 // 新帖可能落在任何日期，全部缓存作废
       if (!activeDate) activeDate = dateList[dateList.length - 1] || null;
-      if (activeDate) return loadPosts(activeDate);
+      if (activeDate) return loadPosts(activeDate, { force: true });
     }).catch(function () {});
   };
 

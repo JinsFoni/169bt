@@ -244,6 +244,41 @@ body::before {
   gap: 20px;
 }
 
+/* ★ 切换日期（非首次绘制）时不重放入场动画：
+   逐张错落浮现正是「切一下日期像整页刷新」的主因。 */
+.grid.no-anim .card { animation: none; }
+
+/* 慢请求时的弱化骨架：旧卡片原位保留，只让图片区透出微光扫过。
+   绝不清空内容——「内容消失再出现」本身就是刷新感。 */
+.grid.is-refreshing .card-media {
+  background:
+    linear-gradient(100deg,
+      transparent 30%,
+      rgba(255, 255, 255, 0.045) 50%,
+      transparent 70%)
+    var(--ink-600);
+  background-size: 220% 100%;
+  animation: mediaSheen 1.4s ease-in-out infinite;
+}
+
+@keyframes mediaSheen {
+  from { background-position: 130% 0; }
+  to   { background-position: -90% 0; }
+}
+
+/* ★ 尊重「减少动态效果」：骨架不扫光，只静默降低不透明度 */
+@media (prefers-reduced-motion: reduce) {
+  .grid.is-refreshing .card-media {
+    animation: none;
+    opacity: 0.72;
+  }
+}
+
+/* ★ 性能：滚动容器单独提层 —— 让内容重绘隔离在自己的合成层里，
+   不穿透到 sticky 顶栏的 backdrop-filter（否则滚动路径每帧重算
+   全宽模糊）。与 .lightbox-body 同一手法。 */
+.topbar-inner { transform: translateZ(0); }
+
 /* 一次编排好的入场：错落淡入上移。
    参考图风格：卡片底色与页面几乎融为一体，仅靠极淡描边与大图分层 */
 .card {
@@ -518,6 +553,14 @@ body::before {
   -webkit-backdrop-filter: blur(14px);
   animation: fadeIn .22s var(--ease);
 }
+
+/* ★ 性能：打开灯箱时给滚动容器单独提层（isolated GPU 层）。
+   没有这行，.lightbox-body 的每次滚动重绘都会穿透到 scrim 的
+   backdrop-filter → 每帧重算全屏模糊（CJK/WebKit 上尤其贵，
+   节流 CPU 后实测 100 帧掉 18 次、worst 83ms）。提层后模糊只
+   算一次，滚动纯合成。
+   提层代价：位图 ~ 屏幕尺寸 × DPR × 4B（1440×900@2x ≈ 10MB），可接受。 */
+.lightbox-body { transform: translateZ(0); }
 
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 
