@@ -1,6 +1,6 @@
 [project]
 name = "bt169"
-version = "0.1.0"
+version = "1.0.0"
 description = "169bt 归档台 —— 个人自用的 4K 帖归档与 ED2K 提取"
 requires-python = ">=3.10"
 dependencies = [
@@ -9,6 +9,13 @@ dependencies = [
     "httpx>=0.27",
     "cryptography>=42",
     "telethon>=1.36",
+    # RSS/HTML 解析（source/parse.py）与图片处理（collector/imagecache.py）。
+    # 曾漏声明：本地 venv 手工装过能跑，pip install 后即 ModuleNotFoundError
+    # ——依赖必须以 pyproject 为准。
+    "selectolax>=0.3",
+    "pillow>=10",
+    # 验证码识别（source/captcha.py，延迟导入）。onnxruntime 是它的传递依赖。
+    "ddddocr>=1.5",
 ]
 
 [project.optional-dependencies]
