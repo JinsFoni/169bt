@@ -1,0 +1,17 @@
+# 构建上下文保持最小：源码 + 前端即可。
+# ★ data/ 绝不能进镜像——真实 SQLite 库里有 AES 加密的论坛密码/TG session。
+.git
+.github
+.venv
+venv
+__pycache__
+**/__pycache__
+*.pyc
+.pytest_cache
+data
+docs
+tests
+*.md
+!README.md
+Dockerfile
+.dockerignore

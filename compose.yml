@@ -1,0 +1,28 @@
+# 169bt 归档台 —— compose 部署
+#
+#   docker compose up -d
+#
+# 权限：PUID/PGID = 挂载的数据目录属主（宿主上 id -u / id -g）。
+#       容器启动时按它建用户、chown /data，再降权运行。
+# 密钥：敏感字段（论坛密码 / TG session）用 data/169bt.key 加密；
+#       想固定密钥（换容器不失效）就设 BT169_SECRET_KEY（base64 的 32 字节：
+#       openssl rand -base64 32），不设则首次启动自动生成。
+# 时区：TZ 影响归档日期的归属（默认 UTC，中国时区设 Asia/Shanghai）。
+
+services:
+  bt169:
+    build: .
+    # image: ghcr.io/jinsfoni/169bt:latest   # 用 GHCR 镜像时注释 build
+    container_name: bt169
+    restart: unless-stopped
+    ports:
+      - "8899:8899"
+    environment:
+      PUID: 1000          # ← 改成宿主数据目录属主的 UID
+      PGID: 1000          # ← 同上，GID
+      TZ: Asia/Shanghai
+      # BT169_SECRET_KEY: "base64编码的32字节密钥"
+    volumes:
+      - ./data:/data      # bind mount；PUID/PGID 与此目录属主对齐
+    healthcheck:
+      disable: false      # 用镜像自带的 /api/health 探针

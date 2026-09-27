@@ -27,7 +27,15 @@ DATA_DIR = Path(
 )
 DB_PATH = DATA_DIR / "169bt.db"
 IMAGE_DIR = DATA_DIR / "images"
-UI_DIR = PROJECT_ROOT / "ui"
+
+#: 前端静态资源目录。★ 可用 ``BT169_UI_DIR`` 覆盖。
+#:
+#: 存在的理由：Docker 镜像用 ``pip install .`` 装包，包里只有 ``bt169/``，
+#: 不含仓库根的 ``ui/``。镜像里把 ``ui/`` 拷到 ``/app/ui`` 并设此变量指向它，
+#: 服务即可正常出页面（默认值仍指向源码树，本地开发零配置）。~
+UI_DIR = Path(
+    os.environ.get("BT169_UI_DIR") or (PROJECT_ROOT / "ui")
+)
 
 #: 落库前必须加密的设置键名（比对的是**最后一段**）。
 SECRET_FIELDS = frozenset(
