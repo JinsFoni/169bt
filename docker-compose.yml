@@ -2,6 +2,8 @@
 #
 #   docker compose up -d
 #
+# 镜像：使用 GHCR 预构建镜像（发布 Release 时自动构建，多架构），
+#       无需本地 build；想本地构建再改回 `build: .`。
 # 权限：PUID/PGID = 挂载的数据目录属主（宿主上 id -u / id -g）。
 #       容器启动时按它建用户、chown /data，再降权运行。
 # 密钥：敏感字段（论坛密码 / TG session）用 data/169bt.key 加密；
@@ -11,8 +13,8 @@
 
 services:
   bt169:
-    build: .
-    # image: ghcr.io/jinsfoni/169bt:latest   # 用 GHCR 镜像时注释 build
+    image: ghcr.io/jinsfoni/169bt:latest
+    # build: .                               # 想本地构建时改用这行
     container_name: bt169
     restart: unless-stopped
     ports:

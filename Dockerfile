@@ -1,7 +1,7 @@
 # 169bt 归档台 —— 生产镜像
 #
 # 本地构建：docker build -t 169bt .
-# compose： docker compose up -d   （PUID/PGID/时区见 compose.yml）
+# compose： docker compose up -d   （PUID/PGID/时区见 docker-compose.yml）
 #
 # 设计要点：
 #   - ``pip install .`` 装包（migrations 随包）；前端 ui/ 在包外，单独
@@ -11,7 +11,7 @@
 #     下文里带 data/（.dockerignore 已排除——真实库里有加密密钥）。
 #   - PUID/PGID 权限模式：以 root 启动 → docker/entrypoint.sh 按环境
 #     变量建用户/组并 chown /data → gosu 降权 exec。bind mount 到 NAS
-#     上任意属主的目录都能读写（compose.yml 里改数字即可）。
+#     上任意属主的目录都能读写（docker-compose.yml 里改数字即可）。
 #   - 镜像内无构建工具链（slim + 纯运行时依赖）。
 
 FROM python:3.14-slim

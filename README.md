@@ -81,12 +81,12 @@ python3 -m venv .venv
 ### Docker（推荐）
 
 ```bash
-docker compose up -d          # 构建 + 启动，数据落 ./data
+docker compose up -d          # 拉取镜像 + 启动，数据落 ./data
 docker compose logs -f        # 跟日志
 docker compose down           # 停止（数据保留）
 ```
 
-`compose.yml` 里的关键环境变量：
+`docker-compose.yml` 里的关键环境变量：
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
@@ -94,8 +94,8 @@ docker compose down           # 停止（数据保留）
 | `TZ` | `UTC` | 时区，影响归档日期归属；中国时区设 `Asia/Shanghai` |
 | `BT169_SECRET_KEY` | 自动生成 | 主密钥（base64 的 32 字节，`openssl rand -base64 32`）。固定它，换容器后已存密码才能继续解密 |
 
-用 GHCR 镜像：注释 `build: .`，改用 `image: ghcr.io/jinsfoni/169bt:latest`
-（镜像在发布 Release 时自动构建，纯 push 代码不会构建）。
+GHCR 镜像已默认写在 `docker-compose.yml` 里（`image: ghcr.io/jinsfoni/169bt:latest`，
+镜像在发布 Release 时自动构建，纯 push 代码不会构建）；想本地构建就换成 `build: .`。
 
 镜像以 root 启动、由 `docker/entrypoint.sh` 建用户后 `gosu` 降权——root 只存活到 exec 之前；
 若显式 `--user` 运行则 PUID/PGID 不生效，需自行保证数据目录可写。
