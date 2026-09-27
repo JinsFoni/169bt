@@ -23,6 +23,7 @@ import threading
 import time
 from typing import Any, Callable
 
+from bt169 import tgloop
 from bt169.telegram import RateLimited
 
 __all__ = [
@@ -72,28 +73,37 @@ class TelethonSigner:
         from telethon import TelegramClient
         from telethon.sessions import StringSession
 
+        # ★ start/verify/password 分属**不同的 HTTP 请求** → 可能落在
+        #   线程池的不同线程 → 而连接后禁止换事件循环（同 mtpproto 的
+        #   真实故障）。所有调用都递交到 tgloop 的常驻 loop 线程。
+        self._loop = tgloop._ensure_loop()
+
         # 登录期间用空 StringSession：完成时才有可用会话
         self._client = TelegramClient(
             StringSession(), int(api_id), api_hash
         )
 
+    def _run(self, coro: Any) -> Any:
+        return tgloop.run(coro)
+
     def send_code(self, phone: str) -> None:
-        self._client.connect()
-        self._client.send_code_request(phone)
+        async def _go() -> None:
+            await tgloop.maybe_await(self._client.connect())
+            await tgloop.maybe_await(self._client.send_code_request(phone))
+        self._run(_go())
 
     def sign_in(self, code: str) -> None:
-        # send_code_request 后客户端已记住手机号，无需再传
-        self._client.sign_in(code=code)
+        self._run(tgloop.maybe_await(self._client.sign_in(code=code)))
 
     def sign_in_password(self, password: str) -> None:
-        self._client.sign_in(password=password)
+        self._run(tgloop.maybe_await(self._client.sign_in(password=password)))
 
     def session(self) -> str:
         return self._client.session.save() or ""
 
     def cancel(self) -> None:
         try:
-            self._client.disconnect()
+            self._run(tgloop.maybe_await(self._client.disconnect()))
         except Exception:  # noqa: BLE001 — 清理尽力而为
             pass
 

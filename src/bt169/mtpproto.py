@@ -16,6 +16,11 @@ Bot API 路径（原 ``TelegramClient``）永远无法把链接送进 NS Bot 背
   ``RateLimited`` / ``TelegramError``（E-7 边界）。
 - **懒加载单例**：长连接复用，进程内只连一次；发送失败不关闭连接
   （短间隔重发不必重握手）。
+- **所有 Telethon 调用跑在专用 loop 线程**（:mod:`bt169.tgloop`）：
+  FastAPI 同步路由的任何两次请求可能落在不同线程，而 Telethon 在首次
+  ``connect()`` 后禁止换事件循环（否则 "The asyncio event loop must not
+  change after connection"）。递交到常驻 loop 线程后，连接真正可跨
+  请求复用，与 :func:`get_sender` 的单例设计配套。
 """
 
 from __future__ import annotations
@@ -28,6 +33,7 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 
 from bt169.telegram import TelegramNotConfigured
+from bt169.tgloop import maybe_await, run
 
 __all__ = ["MtpNotConfigured", "MtpSender", "build_sender", "get_sender"]
 
@@ -57,9 +63,12 @@ class MtpSender:
     def send(self, text: str) -> int:
         """发送一条文本到 target，返回 message_id。
 
+        ★ 全程在专用 loop 线程执行（:mod:`bt169.tgloop`）：FastAPI 同步
+          路由每次请求可能在不同线程，而 Telethon 禁止连接后换事件循环。
+
         Raises:
             RateLimited: FloodWait——retry_after 用服务端给定的秒数。
-            TelegramError: 其他失败（含网络异常）。
+            TelegramError: 其他失败（含网络异常、超时）。
             MtpNotConfigured: target 为空。
         """
         from bt169.telegram import RateLimited, TelegramError
@@ -70,12 +79,15 @@ class MtpSender:
         from telethon import errors
 
         try:
-            # ★ Telethon 不会自动重连：客户端处于断开状态（新建/上次断开）
-            #   时直接 send 会报 "Cannot send requests while disconnected"。
-            #   先 connect——已连接时是幂等空操作。
-            self.client.connect()
-            msg = self.client.send_message(self.target, text)
-            return int(getattr(msg, "id", 0) or 0)
+            async def _send() -> int:
+                # ★ Telethon 不会自动重连：客户端处于断开状态（新建/上次断开）
+                #   时直接 send 会报 "Cannot send requests while disconnected"。
+                #   先 connect——已连接时是幂等空操作。
+                await maybe_await(self.client.connect())
+                msg = await maybe_await(self.client.send_message(self.target, text))
+                return int(getattr(msg, "id", 0) or 0)
+
+            return run(_send())
         except errors.FloodWaitError as exc:
             raise RateLimited(
                 f"Telegram 限流，需等待 {exc.seconds} 秒",
@@ -145,10 +157,12 @@ def get_sender(settings: Any) -> MtpSender:
     sig = (api_id, api_hash, session, target)
     with _lock:
         if _sender is None or _sender_sig != sig:
-            # 先丢旧连接（尽力而为；失败不影响新连接建立）
+            # 先丢旧连接（尽力而为；失败不影响新连接建立）。
+            # ★ 也必须递交到专用 loop——disconnect 是协程，跨线程直接调
+            #   会踩同一个事件循环变更问题。
             if _sender is not None:
                 try:
-                    _sender.client.disconnect()
+                    run(_sender.client.disconnect())
                 except Exception:  # noqa: BLE001
                     pass
             client = TelegramClient(
