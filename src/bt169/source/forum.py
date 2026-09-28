@@ -11,7 +11,7 @@ from __future__ import annotations
 import random
 import time
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
 import httpx
 
@@ -25,6 +25,26 @@ from bt169.source.parse import (
 )
 
 __all__ = ["ForumClient", "RateLimiter", "FetchError", "LoginRequired"]
+
+
+def httpx_kwargs_for(db: Any) -> dict[str, Any]:
+    """从数据库读 ``proxy.*`` 设置 → httpx 构造参数。
+
+    ★ 独立小函数而非直接调 netproxy：ForumClient 是整个采集链路的根，
+    而代理参数需要 SettingsRepo（要 SecretBox）。这里包一层，调用方
+    只要给 Database 就行。读设置失败 → 直连（trust_env=False），
+    绝不让代理配置问题把采集拖埻。
+    """
+    from bt169.crypto import load_secret_box
+    from bt169.db import Database
+    from bt169.netproxy import httpx_kwargs
+    from bt169.repo.settings import SettingsRepo
+
+    assert isinstance(db, Database)
+    try:
+        return httpx_kwargs(SettingsRepo(db, load_secret_box()))
+    except Exception:  # noqa: BLE001 — 密钥坏了/库锁了 → 直连
+        return {"trust_env": False}
 
 
 class FetchError(RuntimeError):
@@ -91,10 +111,25 @@ class ForumClient:
         timeout: float = 30.0,
         client: httpx.Client | None = None,
         user_agent: str = config.USER_AGENT,
+        db: Any | None = None,
     ) -> None:
         self.base = base.rstrip("/")
         self._limiter = limiter or RateLimiter()
-        self._client = client or httpx.Client(timeout=timeout, follow_redirects=False)
+        if client is not None:
+            self._client = client
+        else:
+            # ★ 默认构造时读应用内代理设置（``proxy.*``）：采集链路的
+            #   所有 ForumClient 都从这里拿到代理（netproxy 是唯一入口）。
+            #   ``trust_env=False`` → compose 环境变量不参与。
+            #   测试注入 ``client=`` 时不读设置（保持零依赖）。
+            from bt169.netproxy import httpx_kwargs
+
+            kw = {"timeout": timeout, "follow_redirects": False}
+            if db is not None:
+                kw.update(httpx_kwargs_for(db))
+            else:
+                kw["trust_env"] = False
+            self._client = httpx.Client(**kw)
         self._owns_client = client is None
         # ★ 必须**强制**带浏览器 UA：实测论坛对默认 ``python-httpx/x.y.z``
         #   会返回异常页。注意不能用 ``setdefault``——httpx 会自己先填上

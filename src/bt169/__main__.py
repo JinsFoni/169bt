@@ -10,6 +10,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 from bt169 import __version__, config
 from bt169.crypto import SecretBox
@@ -176,7 +177,11 @@ def _cmd_login(args: argparse.Namespace) -> int:
             return 2
 
         store = SessionStore(db)
-        client = ForumClient()
+        from bt169.netproxy import httpx_kwargs
+
+        client = ForumClient(
+            db=db, client=httpx.Client(**httpx_kwargs(settings))
+        )
         try:
             lc = LoginClient(
                 client=client, store=store, solvers=[PythonSolver()]
@@ -217,14 +222,14 @@ class _TelethonSigner:
     ★ TelegramClient 构造时就要求 api_id/api_hash（Telethon 硬约束）。
     """
 
-    def __init__(self, *, api_id: int, api_hash: str) -> None:
+    def __init__(self, *, api_id: int, api_hash: str, proxy: Any = None) -> None:
         import telethon.sync  # noqa: F401  ★ 缺它协程永不执行
 
         from telethon import TelegramClient
         from telethon.sessions import StringSession
 
         self._client = TelegramClient(
-            StringSession(), int(api_id), api_hash
+            StringSession(), int(api_id), api_hash, proxy=proxy
         )
 
     def start(self, phone_cb, code_cb, password_cb):
@@ -240,9 +245,9 @@ class _TelethonSigner:
             pass
 
 
-def _tg_signer(*, api_id: int, api_hash: str):
+def _tg_signer(*, api_id: int, api_hash: str, proxy: Any = None):
     """构造登录器（独立函数便于测试替换）。"""
-    return _TelethonSigner(api_id=api_id, api_hash=api_hash)
+    return _TelethonSigner(api_id=api_id, api_hash=api_hash, proxy=proxy)
 
 
 def _cmd_tg_login(args: argparse.Namespace) -> int:
@@ -273,7 +278,13 @@ def _cmd_tg_login(args: argparse.Namespace) -> int:
             return 2
 
         print("连接 Telegram …")
-        signer = _tg_signer(api_id=int(api_id), api_hash=api_hash)
+        from bt169.netproxy import telethon_proxy
+
+        signer = _tg_signer(
+            api_id=int(api_id),
+            api_hash=api_hash,
+            proxy=telethon_proxy(settings),
+        )
         try:
             # 统一契约：start(phone, code_cb, password_cb) -> session 字符串。
             # 真实实现内部包 Telethon（sync 模块已挂同步包装）。
@@ -355,7 +366,7 @@ def _cmd_collect(args: argparse.Namespace) -> int:
             print("提示：无有效登录会话 → 帖子会停在 pending（无法感谢解锁）",
                   file=sys.stderr)
 
-        client = ForumClient(cookies=cookies)
+        client = ForumClient(cookies=cookies, db=db)
         collector = Collector(
             client=client,
             posts=PostRepo(db),
@@ -641,33 +652,10 @@ def _cmd_doctor() -> int:
 
 
 def _load_or_create_key() -> SecretBox:
-    """读取主密钥；不存在则生成 32 字节随机密钥并写盘（0600）。
+    """读取主密钥（实现已下沉到 :func:`bt169.crypto.load_secret_box`）。"""
+    from bt169.crypto import load_secret_box
 
-    也支持从 ``BT169_SECRET_KEY`` 注入（base64，32 字节）——
-    容器化部署时避免把密钥写进镜像层。
-    """
-    import base64
-
-    env = os.environ.get("BT169_SECRET_KEY")
-    if env:
-        try:
-            return SecretBox(base64.b64decode(env, validate=True))
-        except Exception as exc:
-            raise SystemExit(
-                f"BT169_SECRET_KEY 非法（需要 base64 编码的 32 字节）：{exc}"
-            ) from exc
-
-    config.DATA_DIR.mkdir(parents=True, exist_ok=True)
-    path = config.DATA_DIR / KEY_FILE_NAME
-    if path.exists():
-        raw = base64.b64decode(path.read_text(encoding="ascii").strip())
-        return SecretBox(raw)
-
-    raw = os.urandom(32)
-    path.write_text(base64.b64encode(raw).decode("ascii"), encoding="ascii")
-    path.chmod(0o600)
-    print(f"已生成主密钥：{path}（权限 0600，请勿泄露）")
-    return SecretBox(raw)
+    return load_secret_box()
 
 
 if __name__ == "__main__":

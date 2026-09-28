@@ -154,14 +154,33 @@ class CachedImage:
 
 
 def _default_fetch(url: str) -> bytes:
-    """默认下载实现（图片在独立图床，不受论坛限速约束）。"""
+    """默认下载实现（图片在独立图床，不受论坛限速约束）。
+
+    ★ 图床下载属采集链路 → 受应用内代理设置约束（每次下载时读取，
+    改设置即时生效）。读设置失败 → 直连（trust_env=False）。
+    """
     import httpx
+
+    from bt169.crypto import load_secret_box
+    from bt169.db import Database
+    from bt169.netproxy import httpx_kwargs
+    from bt169.repo.settings import SettingsRepo
+
+    try:
+        db = Database(config.DB_PATH)
+        try:
+            proxy_kw = httpx_kwargs(SettingsRepo(db, load_secret_box()))
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001 — 库坏了 → 直连
+        proxy_kw = {"trust_env": False}
 
     resp = httpx.get(
         url,
         headers={"User-Agent": config.USER_AGENT, "Accept": "image/*"},
         timeout=30.0,
         follow_redirects=True,
+        **proxy_kw,
     )
     resp.raise_for_status()
     return resp.content

@@ -12,6 +12,8 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Request
 
+import httpx
+
 from bt169 import __version__
 from bt169.config import section_key
 from bt169.repo.collect import CollectRepo, last_run_stats
@@ -125,10 +127,16 @@ def build_renewer(request: Request) -> SessionRenewer:
 
         ★ 不能常驻复用：登录是一次性动作，且旧连接会在 Cookie 失效后
           一直复用死连接。
+
+        ★ 登录请求同样受应用内代理设置约束（采集链路的一部分）。
         """
 
         def login(self, username: str, password: str):  # type: ignore[no-untyped-def]
-            client = ForumClient()
+            from bt169.netproxy import httpx_kwargs
+
+            client = ForumClient(
+                client=httpx.Client(**httpx_kwargs(settings))
+            )
             try:
                 lc = LoginClient(client=client, store=store,
                                  solvers=[PythonSolver()])

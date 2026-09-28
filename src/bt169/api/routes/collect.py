@@ -133,7 +133,7 @@ def build_collector(app: Any) -> Collector:
     session = sessions.load()
     cookies = session.cookies if session and session.valid else None
 
-    client = ForumClient(cookies=cookies)
+    client = ForumClient(cookies=cookies, db=db)
     image_dir = getattr(app.state, "image_dir", None)
     return Collector(
         client=client,
@@ -190,7 +190,7 @@ def build_feed_client(app: Any) -> ForumClient:
 
     ★ 复用 ``ForumClient``：它已经处理好了 UA、超时与错误包装。
     """
-    return ForumClient()
+    return ForumClient(db=app.state.db)
 
 
 # ---------------------------------------------------------------- 请求模型

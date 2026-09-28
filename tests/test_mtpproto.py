@@ -96,7 +96,7 @@ def test_build_sender_wires_settings(db, box, monkeypatch):
 
     captured = {}
 
-    def fake_ctor(session, api_id, api_hash):
+    def fake_ctor(session, api_id, api_hash, proxy=None):
         captured.update(session=session, api_id=api_id, api_hash=api_hash)
         return FakeMtp()
 

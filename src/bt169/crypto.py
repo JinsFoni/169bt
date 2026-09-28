@@ -11,10 +11,19 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
-__all__ = ["SecretBox", "DecryptError", "hash_password", "verify_password"]
+__all__ = [
+    "SecretBox",
+    "DecryptError",
+    "hash_password",
+    "verify_password",
+    "load_secret_box",
+]
 
 _NONCE_BYTES = 12          # GCM 推荐 96 bit
 _KDF_ITERATIONS = 600_000  # OWASP 对 PBKDF2-SHA256 的建议量级
+
+#: 主密钥文件名（相对 DATA_DIR）。供 load_secret_box 与 CLI 共用。
+KEY_FILE_NAME = "169bt.key"
 
 
 class DecryptError(Exception):
@@ -97,3 +106,39 @@ def _pbkdf2(password: str, salt: bytes, iterations: int) -> bytes:
         algorithm=hashes.SHA256(), length=32, salt=salt, iterations=iterations
     )
     return kdf.derive(password.encode("utf-8"))
+
+
+def load_secret_box() -> SecretBox:
+    """读取主密钥；不存在则生成 32 字节随机密钥并写盘（0600）。
+
+    也支持从 ``BT169_SECRET_KEY`` 注入（base64，32 字节）——
+    容器化部署时避免把密钥写进镜像层。
+
+    ★ 放在 crypto 而非 ``__main__``：不止 CLI 要密钥——请求处理路径上
+    （如 ForumClient 读代理设置）也需要拿到同一个 SecretBox。
+    """
+    import base64
+    import os as _os
+
+    from bt169 import config as _config
+
+    env = _os.environ.get("BT169_SECRET_KEY")
+    if env:
+        try:
+            return SecretBox(base64.b64decode(env, validate=True))
+        except Exception as exc:
+            raise SystemExit(
+                f"BT169_SECRET_KEY 非法（需要 base64 编码的 32 字节）：{exc}"
+            ) from exc
+
+    _config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    path = _config.DATA_DIR / KEY_FILE_NAME
+    if path.exists():
+        raw = base64.b64decode(path.read_text(encoding="ascii").strip())
+        return SecretBox(raw)
+
+    raw = _os.urandom(32)
+    path.write_text(base64.b64encode(raw).decode("ascii"), encoding="ascii")
+    path.chmod(0o600)
+    print(f"已生成主密钥：{path}（权限 0600，请勿泄露）")
+    return SecretBox(raw)

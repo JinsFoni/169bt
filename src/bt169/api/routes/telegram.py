@@ -59,7 +59,14 @@ def build_client(settings: SettingsRepo) -> TelegramClient:
     """
     token = settings.get(config.section_key("tg", "token")) or ""
     chat_id = settings.get(config.section_key("tg", "chat_id")) or ""
-    return TelegramClient(token=token, chat_id=chat_id, http=httpx.Client())
+    # ★ TG Bot API 与采集同受代理设置约束（netproxy 唯一入口，
+    #   trust_env=False → compose 环境变量不参与）。
+    from bt169.netproxy import httpx_kwargs
+
+    return TelegramClient(
+        token=token, chat_id=chat_id,
+        http=httpx.Client(**httpx_kwargs(settings)),
+    )
 
 
 # ---------------------------------------------------------------- 接口
@@ -220,6 +227,7 @@ def tg_login_start(
 ) -> dict[str, Any]:
     """发送验证码。冷却期内 → 429（前端禁用按钮倒计时）。"""
     from bt169.config import section_key
+    from bt169.netproxy import telethon_proxy
 
     api_id = (settings.get(section_key("tg", "api_id")) or "").strip()
     api_hash = (settings.get(section_key("tg", "api_hash")) or "").strip()
@@ -238,6 +246,7 @@ def tg_login_start(
             body.phone.strip(),
             api_id=int(api_id),
             api_hash=api_hash,
+            proxy=telethon_proxy(settings),
         )
     except RateLimited as exc:
         raise _fail(exc) from exc

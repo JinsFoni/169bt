@@ -110,6 +110,7 @@ def build_sender(settings: Any) -> MtpSender:
     供单条转发与测试使用；常驻服务请用 :func:`get_sender`（单例）。
     """
     from bt169.config import section_key
+    from bt169.netproxy import telethon_proxy
 
     api_id = (settings.get(section_key("tg", "api_id")) or "").strip()
     api_hash = (settings.get(section_key("tg", "api_hash")) or "").strip()
@@ -123,7 +124,8 @@ def build_sender(settings: Any) -> MtpSender:
             "（运行 bt169 tg-login 生成）"
         )
     client = TelegramClient(
-        StringSession(session), int(api_id), api_hash
+        StringSession(session), int(api_id), api_hash,
+        proxy=telethon_proxy(settings),
     )
     return MtpSender(client, target)
 
@@ -134,7 +136,7 @@ _sender_sig: tuple[str, str, str, str] | None = None
 
 
 def get_sender(settings: Any) -> MtpSender:
-    """进程内单例：凭据（api_id/api_hash/session/target）不变就复用连接。
+    """进程内单例：凭据（api_id/api_hash/session/target）与代理不变就复用连接。
 
     设置改动 → 换凭据签名 → 重建客户端。**不抛连接异常**——连接推迟到
     首次 ``send``（Telethon 在 send 前会自动 connect）。
@@ -142,6 +144,7 @@ def get_sender(settings: Any) -> MtpSender:
     global _sender, _sender_sig
 
     from bt169.config import section_key
+    from bt169.netproxy import telethon_proxy
 
     api_id = (settings.get(section_key("tg", "api_id")) or "").strip()
     api_hash = (settings.get(section_key("tg", "api_hash")) or "").strip()
@@ -154,7 +157,8 @@ def get_sender(settings: Any) -> MtpSender:
             "（运行 bt169 tg-login 生成）"
         )
 
-    sig = (api_id, api_hash, session, target)
+    proxy = telethon_proxy(settings)
+    sig = (api_id, api_hash, session, target, repr(proxy))
     with _lock:
         if _sender is None or _sender_sig != sig:
             # 先丢旧连接（尽力而为；失败不影响新连接建立）。
@@ -166,7 +170,7 @@ def get_sender(settings: Any) -> MtpSender:
                 except Exception:  # noqa: BLE001
                     pass
             client = TelegramClient(
-                StringSession(session), int(api_id), api_hash
+                StringSession(session), int(api_id), api_hash, proxy=proxy
             )
             _sender = MtpSender(client, target)
             _sender_sig = sig

@@ -64,7 +64,7 @@ class TelethonSigner:
     ``MtpLoginManager.start`` 透传给工厂，再进入这里。
     """
 
-    def __init__(self, *, api_id: int, api_hash: str) -> None:
+    def __init__(self, *, api_id: int, api_hash: str, proxy: Any = None) -> None:
         # ★ 必须 import telethon.sync:它把客户端的协程方法改写为同步包装。
         #   缺了它 connect()/send_code_request() 只会创建协程对象而**永不执行**
         #   （日志里 "coroutine ... was never awaited"），接口却返回 200，
@@ -79,8 +79,9 @@ class TelethonSigner:
         self._loop = tgloop._ensure_loop()
 
         # 登录期间用空 StringSession：完成时才有可用会话
+        # ★ proxy 由 MtpLoginManager.start 从设置传入（netproxy 唯一入口）
         self._client = TelegramClient(
-            StringSession(), int(api_id), api_hash
+            StringSession(), int(api_id), api_hash, proxy=proxy
         )
 
     def _run(self, coro: Any) -> Any:
@@ -152,12 +153,13 @@ class MtpLoginManager:
     # ------------------------------------------------------------ 步骤
 
     def start(
-        self, phone: str, *, api_id: int, api_hash: str
+        self, phone: str, *, api_id: int, api_hash: str, proxy: Any = None
     ) -> dict[str, Any]:
         """发送验证码。冷却期内抛 :class:`RateLimited`（剩余秒数透传）。
 
         ``api_id`` / ``api_hash`` 由调用方（路由）从设置读出后传入——
         Telethon 客户端构造时就要求它们，不能等 verify 阶段再给。
+        ``proxy`` 同理：从设置读出的 Telethon 代理 dict（可为 None）。
         """
         with self._lock:
             elapsed = self._clock() - self._last_start
@@ -170,7 +172,9 @@ class MtpLoginManager:
             # 重发 = 放弃上一次（断开旧客户端，避免连接泄漏）
             self._reset_locked()
             try:
-                signer = self._make_signer(api_id=api_id, api_hash=api_hash)
+                signer = self._make_signer(
+                    api_id=api_id, api_hash=api_hash, proxy=proxy
+                )
                 signer.send_code(phone)
             except RateLimited:
                 raise

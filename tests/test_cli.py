@@ -473,7 +473,7 @@ def test_tg_login_saves_session(tmp_path, monkeypatch, capsys):
 
     import bt169.__main__ as m
     monkeypatch.setattr(m, "_tg_signer",
-                        lambda *, api_id, api_hash: FakeSigner())
+                        lambda *, api_id, api_hash, proxy=None: FakeSigner())
 
     answers = iter(["+8613800000000", "12345", "s3cret"])
     monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
