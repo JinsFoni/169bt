@@ -69,19 +69,39 @@
       <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="2.7"/><path d="M15.9 12.2a1.5 1.5 0 0 0 .3 1.65l.05.05a1.8 1.8 0 1 1-2.55 2.55l-.05-.05a1.5 1.5 0 0 0-1.65-.3 1.5 1.5 0 0 0-.9 1.35v.15a1.8 1.8 0 1 1-3.6 0v-.08a1.5 1.5 0 0 0-.98-1.35 1.5 1.5 0 0 0-1.65.3l-.05.05a1.8 1.8 0 1 1-2.55-2.55l.05-.05a1.5 1.5 0 0 0 .3-1.65 1.5 1.5 0 0 0-1.35-.9H1.2a1.8 1.8 0 1 1 0-3.6h.08a1.5 1.5 0 0 0 1.35-.98 1.5 1.5 0 0 0-.3-1.65l-.05-.05A1.8 1.8 0 1 1 4.83 2.3l.05.05a1.5 1.5 0 0 0 1.65.3h.07a1.5 1.5 0 0 0 .9-1.35V1.2a1.8 1.8 0 1 1 3.6 0v.08a1.5 1.5 0 0 0 .9 1.35 1.5 1.5 0 0 0 1.65-.3l.05-.05a1.8 1.8 0 1 1 2.55 2.55l-.05.05a1.5 1.5 0 0 0-.3 1.65v.07a1.5 1.5 0 0 0 1.35.9h.15a1.8 1.8 0 1 1 0 3.6h-.08a1.5 1.5 0 0 0-1.35.9Z"/></svg>
     </button>
 
-    <nav class="date-nav" aria-label="归档日期导航">
+    <nav class="date-nav" id="dateNav" aria-label="归档日期导航">
       <button class="nav-btn" id="prevDay" type="button" aria-label="上一个归档日期">
         <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M12.5 4.5 7 10l5.5 5.5"/></svg>
       </button>
 
-      <div class="date-display">
-        <span class="date-value" id="dateValue">—</span>
+      <!-- 日期本身就是按钮：点击弹出月历，可跳到任意有归档的日期 -->
+      <button class="date-display" id="dateToggle" type="button"
+              aria-haspopup="dialog" aria-expanded="false" title="选择归档日期">
+        <span class="date-line">
+          <span class="date-value" id="dateValue">—</span>
+          <svg class="date-caret" viewBox="0 0 20 20" aria-hidden="true"><path d="m6 8 4 4 4-4"/></svg>
+        </span>
         <span class="date-meta" id="dateMeta">—</span>
-      </div>
+      </button>
 
       <button class="nav-btn" id="nextDay" type="button" aria-label="下一个归档日期">
         <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7.5 4.5 13 10l-5.5 5.5"/></svg>
       </button>
+
+      <!-- 月历选择器（非模态弹层）。只有有归档的日期可点，无归档置灰。 -->
+      <div class="datepick" id="datePick" role="dialog" aria-modal="false"
+           aria-label="选择归档日期" hidden>
+        <div class="datepick-head">
+          <button class="nav-btn" id="pickPrev" type="button" aria-label="上个月">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M12.5 4.5 7 10l5.5 5.5"/></svg>
+          </button>
+          <span class="datepick-title" id="pickTitle"></span>
+          <button class="nav-btn" id="pickNext" type="button" aria-label="下个月">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7.5 4.5 13 10l-5.5 5.5"/></svg>
+          </button>
+        </div>
+        <div class="datepick-grid" id="pickGrid"></div>
+      </div>
     </nav>
 
   </div>
@@ -92,7 +112,7 @@
 
   <div class="empty" id="empty" hidden>
     <p class="empty-title">这一天没有帖子</p>
-    <p class="empty-hint">用上方的 ◀ ▶ 按钮切换到其他归档日。</p>
+    <p class="empty-hint">用上方的 ◀ ▶ 切换，或点日期打开月历直接选归档日。</p>
   </div>
 </main>
 

@@ -17,3 +17,4 @@ data/
 
 # 测试用 OCR 模型缓存
 .ddddocr/
+.playwright-cli/

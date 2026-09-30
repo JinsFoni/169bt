@@ -29,6 +29,13 @@
   var dateMeta    = $('dateMeta');
   var prevDay     = $('prevDay');
   var nextDay     = $('nextDay');
+  var dateToggle  = $('dateToggle');
+  var dateNav     = $('dateNav');
+  var datePick    = $('datePick');
+  var pickPrev    = $('pickPrev');
+  var pickNext    = $('pickNext');
+  var pickTitle   = $('pickTitle');
+  var pickGrid    = $('pickGrid');
   var copyDay     = $('copyDay');
   var dlDay       = $('dlDay');
   var lightbox    = $('lightbox');
@@ -50,6 +57,9 @@
   //   整页刷新）。现在只原地更新目标按钮，其余卡片纹丝不动。
   var tgSendingDay = false;   // 批量转发中（顶栏「下载本日」，全局唯一）
   var tgSendingTids = {};     // tid → true，单帖转发中（ES5 环境用普通对象当 Set）
+
+  /* 月历选择器状态：当前展示的「2000-01」，非自然今天，以数据为界 */
+  var pickYM = null;          // null = 面板关闭
 
   /* ---------- 工具 ---------- */
 
@@ -449,6 +459,9 @@
     prevDay.disabled = i <= 0;
     nextDay.disabled = i < 0 || i >= dateList.length - 1;
 
+    // 月历入口：无任何归档时无从选择，按钮禁用
+    dateToggle.disabled = !dateList.length;
+
     var copyable = list.filter(function (p) { return p.ed2k; }).length;
     copyDay.disabled = copyable === 0;
     copyDay.title = copyable
@@ -556,6 +569,7 @@
         }
       }
       if (!dateList.length) activeDate = null;
+      pickSync();                // 当月被删空时同步月历（新边界或收起）
       render();
     };
 
@@ -771,6 +785,128 @@
     if (lastFocused && lastFocused.focus) lastFocused.focus();
   }
 
+  /* ---------- 月历选择器 ----------
+
+     点顶栏日期弹出非模态月历。三条边界规则：
+     ① 只含有归档的日期可点（dateList 之外全部置灰）——用户永远不会
+        跳进一个空日子；
+     ② 月份导航以数据为界（首末有归档的月份），不是自然今天；
+     ③ dateList 为空时触发按钮直接禁用，面板根本弹不出来。
+  */
+
+  var PICK_WD = ['一','二','三','四','五','六','日'];   // 周一为首，与网格列序一致
+
+  function pickOpen() {
+    if (!dateList.length) return;                    // 无数据：按钮已禁用，双保险
+    // 初始月份 = 当前归档日所在月（无归档日则取最新一天所在月）
+    var anchor = activeDate || dateList[dateList.length - 1];
+    pickYM = anchor.slice(0, 7);                     // "2026-09"
+    datePick.hidden = false;
+    dateToggle.setAttribute('aria-expanded', 'true');
+    renderPick();
+  }
+
+  function pickClose() {
+    if (pickYM === null) return;
+    pickYM = null;
+    datePick.hidden = true;
+    dateToggle.setAttribute('aria-expanded', 'false');
+  }
+
+  function pickToggle() {
+    if (pickYM === null) pickOpen(); else pickClose();
+  }
+
+  /* "2026-09" → "2026-10" / "2026-08"（跨年安全：借 Date 进位） */
+  function ymShift(ym, dir) {
+    var p = ym.split('-');
+    var d = new Date(+p[0], +p[1] - 1 + dir, 1);
+    return d.getFullYear() + '-' + pad2(d.getMonth() + 1);
+  }
+
+  function pad2(n) { return (n < 10 ? '0' : '') + n; }
+
+  function renderPick() {
+    var p = pickYM.split('-');
+    var y = +p[0], m = +p[1];                       // m: 1-12
+
+    pickTitle.textContent = y + ' 年 ' + m + ' 月';
+
+    // 月份边界：dateList 首末所在月。首尾月之外无任何归档，不可去。
+    var firstYM = dateList[0].slice(0, 7);
+    var lastYM  = dateList[dateList.length - 1].slice(0, 7);
+    pickPrev.disabled = pickYM <= firstYM;
+    pickNext.disabled = pickYM >= lastYM;
+
+    // 当月有归档的日期集合 + 当前选中日
+    var inMonth = {};
+    for (var i = 0; i < dateList.length; i++) {
+      if (dateList[i].slice(0, 7) === pickYM) inMonth[dateList[i]] = true;
+    }
+
+    // 网格：周一为首列；首尾补位格 visibility:hidden 保列对齐
+    var first = new Date(y, m - 1, 1);
+    var lead = (first.getDay() + 6) % 7;            // 周一=0 … 周日=6
+    var nDays = new Date(y, m, 0).getDate();        // 当月天数（day 0 = 上月末）
+
+    var html = PICK_WD.map(function (w) {
+      return '<span class="datepick-wd">' + w + '</span>';
+    }).join('');
+
+    for (var b = 0; b < lead; b++) {
+      html += '<span class="datepick-day is-out"></span>';
+    }
+    for (var d = 1; d <= nDays; d++) {
+      var iso = pickYM + '-' + pad2(d);
+      var has = inMonth[iso];
+      var cls = 'datepick-day' + (has ? ' has-posts' : '') +
+                (iso === activeDate ? ' is-active' : '');
+      html += has
+        ? '<button class="' + cls + '" type="button" data-date="' + iso + '"' +
+          ' title="' + humanDate(iso) + ' · ' + countOf(iso) + ' 帖">' + d + '</button>'
+        : '<span class="' + cls + '" aria-hidden="true">' + d + '</span>';
+    }
+    pickGrid.innerHTML = html;
+  }
+
+  function pickStep(dir) {
+    if (pickYM === null) return;
+    var next = ymShift(pickYM, dir);
+    // 边界由 renderPick 里的 disabled 保证，这里只防御性判断
+    if (next < dateList[0].slice(0, 7) || next > dateList[dateList.length - 1].slice(0, 7)) return;
+    pickYM = next;
+    renderPick();
+  }
+
+  dateToggle.addEventListener('click', pickToggle);
+  pickPrev.addEventListener('click', function () { pickStep(-1); });
+  pickNext.addEventListener('click', function () { pickStep(1); });
+
+  pickGrid.addEventListener('click', function (e) {
+    var btn = e.target.closest('[data-date]');
+    if (!btn) return;
+    pickClose();
+    navTo(btn.dataset.date);
+  });
+
+  // 点面板外部关闭（mousedown 而非 click：拖选文字时误关更少）
+  document.addEventListener('mousedown', function (e) {
+    if (pickYM === null) return;
+    if (dateNav.contains(e.target)) return;
+    pickClose();
+  });
+
+  /* 日期列表变化时收尾：数据没了就别挂着一个月历（采集刷新/删空当月） */
+  function pickSync() {
+    if (pickYM === null) return;
+    if (!dateList.length) { pickClose(); return; }
+    // 当前展示月仍在范围内 → 重渲染（新数据、新边界）；不在则收起
+    var firstYM = dateList[0].slice(0, 7);
+    var lastYM  = dateList[dateList.length - 1].slice(0, 7);
+    if (pickYM >= firstYM && pickYM <= lastYM) renderPick();
+    else pickClose();
+  }
+
   /* ---------- 事件 ---------- */
 
   grid.addEventListener('click', function (e) {
@@ -807,6 +943,10 @@
       if (e.key === 'Escape') closeLightbox();
       return;
     }
+    if (pickYM !== null) {                    // 月历打开：Esc 关闭，快捷键让位
+      if (e.key === 'Escape') pickClose();
+      return;
+    }
     if (e.target.matches('input, textarea')) return;
     if (e.key === 'ArrowLeft')  step(-1);
     if (e.key === 'ArrowRight') step(1);
@@ -819,6 +959,7 @@
     return loadDates().then(function () {
       loadStatus();                        // 不阻塞首屏：TG 状态晚一点到没关系
       activeDate = dateList[dateList.length - 1] || null;
+      pickSync();
       if (!activeDate) { render(); return; }
       return loadPosts(activeDate);
     }).catch(function (e) {
@@ -834,6 +975,7 @@
     return loadDates().then(function () {
       days = {};                 // 新帖可能落在任何日期，全部缓存作废
       if (!activeDate) activeDate = dateList[dateList.length - 1] || null;
+      pickSync();                // 月历开着时同步新数据/新边界，失据则收起
       if (activeDate) return loadPosts(activeDate, { force: true });
     }).catch(function () {});
   };
@@ -855,6 +997,7 @@
     get deleted() { return deleted; },
     get dates()   { return dateList; },
     get active()  { return activeDate; },
+    get pickerOpen() { return pickYM !== null; },
     renderSession: renderSession,
     reload: boot
   };

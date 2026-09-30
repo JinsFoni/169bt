@@ -209,9 +209,35 @@ body::before {
   align-items: center;
   justify-content: center;
   min-width: 132px;
-  padding: 0 8px;
+  padding: 3px 10px 2px;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
   line-height: 1.15;
+  transition: background .18s var(--ease);
 }
+.date-display:hover:not([disabled]) { background: rgba(255,255,255,.07); }
+.date-display[disabled] { cursor: default; }
+
+.date-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.date-caret {
+  width: 12px; height: 12px;
+  fill: none;
+  stroke: var(--text-dim);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform .18s var(--ease);
+}
+.date-display:hover .date-caret { color: var(--text); }
+.date-display[aria-expanded="true"] .date-caret { transform: rotate(180deg); }
 
 .date-value {
   font-family: "Bricolage Grotesque", sans-serif;
@@ -226,6 +252,101 @@ body::before {
   font-size: 11px;
   color: var(--text-dim);
   letter-spacing: .02em;
+}
+
+/* ---------- 月历选择器 ---------- */
+
+.datepick {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  z-index: 45;                 /* 吸顶 topbar（40）之上、lightbox（90）之下 */
+  min-width: 286px;
+  padding: 14px;
+  border-radius: var(--r-img);
+  border: 1px solid var(--line-strong);
+  background: rgba(18,23,34,.97);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  box-shadow: var(--sh-lift);
+  animation: pickIn .18s var(--ease);
+}
+
+@keyframes pickIn {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.datepick-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.datepick-title {
+  font-family: "Bricolage Grotesque", sans-serif;
+  font-weight: 600;
+  font-size: 14px;
+  letter-spacing: -.01em;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.datepick-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 2px;
+}
+
+.datepick-wd {
+  padding: 4px 0;
+  text-align: center;
+  font-size: 10.5px;
+  color: var(--text-faint);
+  letter-spacing: .06em;
+}
+
+.datepick-day {
+  position: relative;
+  aspect-ratio: 1;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--r-chip);
+  background: transparent;
+  font: inherit;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-mid);
+  cursor: pointer;
+  transition: background .14s var(--ease), color .14s var(--ease);
+}
+.datepick-day:hover:not([disabled]) { background: rgba(255,255,255,.09); color: var(--text); }
+.datepick-day[disabled] { color: var(--ink-500); cursor: default; }
+.datepick-day.is-out { visibility: hidden; }   /* 补位格：隐藏但占位 */
+
+.datepick-day.is-active {
+  background: var(--brass);
+  color: var(--ink-900);
+  font-weight: 600;
+}
+.datepick-day.is-active:hover { background: var(--brass); color: var(--ink-900); }
+
+/* 有归档但非当日：微亮底提示「这里有货」 */
+.datepick-day.has-posts { color: var(--text); }
+.datepick-day.has-posts::after {
+  content: '';
+  position: absolute;
+  bottom: 3px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 4px; height: 4px;
+  border-radius: var(--r-pill);
+  background: var(--brass);
+  opacity: .75;
 }
 
 /* ============================ 网格 ============================ */
@@ -1286,6 +1407,9 @@ select.input {
   .grid { grid-template-columns: repeat(auto-fill, minmax(100%, 1fr)); }
   .date-display { min-width: 108px; }
   .date-value { font-size: 14.5px; }
+
+  /* 月历右对齐弹出，窄屏时收回视口内 */
+  .datepick { position: fixed; top: 106px; left: 12px; right: 12px; min-width: 0; }
   .lightbox { padding: 12px; }
   .lightbox-body { padding: 11px; }
 
