@@ -1,6 +1,6 @@
 [project]
 name = "bt169"
-version = "1.0.1"
+version = "1.1.0"
 description = "169bt 归档台 —— 个人自用的 4K 帖归档与 ED2K 提取"
 requires-python = ">=3.10"
 dependencies = [
