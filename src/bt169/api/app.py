@@ -103,7 +103,7 @@ def create_app(
             name="images",
         )
     if ui_dir is not None and Path(ui_dir).is_dir():
-        app.mount("/", StaticFiles(directory=str(ui_dir), html=True), name="ui")
+        app.mount("/", _NoCacheStaticFiles(directory=str(ui_dir), html=True), name="ui")
 
     return app
 
@@ -459,6 +459,24 @@ class _ImmutableStaticFiles(StaticFiles):
     def file_response(self, full_path, stat_result, scope, status_code=200):  # type: ignore[no-untyped-def]
         response = super().file_response(full_path, stat_result, scope, status_code)
         response.headers["cache-control"] = "public, max-age=31536000, immutable"
+        return response
+
+
+class _NoCacheStaticFiles(StaticFiles):
+    """前端 HTML/JS/CSS 用协商缓存，改完代码刷新即生效。
+
+    文件名不带哈希、版本号也不跟着提交走，不能像 ``/img`` 那样
+    immutable；也不能裸奔靠 ``Last-Modified`` 启发式缓存——浏览器会
+    自行决定 CSS「还新鲜」而不回源，出现新 HTML 配旧 CSS 的错配
+    （月历箭头渲染成默认样式的巨大实心三角）。
+
+    ``no-cache`` = 每次都带 ETag 问一次：命中就是 304 空响应，
+    局域网自用协商开销可忽略，换来「git pull + 刷新」的确定性。
+    """
+
+    def file_response(self, full_path, stat_result, scope, status_code=200):  # type: ignore[no-untyped-def]
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        response.headers["cache-control"] = "no-cache"
         return response
 
 
