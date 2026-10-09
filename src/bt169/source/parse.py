@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta, timezone
 from email.utils import parsedate_to_datetime
 
-from selectolax.parser import HTMLParser
+from selectolax.lexbor import LexborHTMLParser as HTMLParser
 
 __all__ = [
     "ListRow",
