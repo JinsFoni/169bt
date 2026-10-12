@@ -75,6 +75,10 @@ _RE_TITLE_FIELD = re.compile(r"\[影片名称\]\s*[:：]\s*([^<\r\n]+)")
 #: 帖子内嵌的封面/详情图（imgccc 图床）。
 _IMGCCC_RE = re.compile(r"https?://[\w.-]*imgccc\.com/[^\s\"'<>]+")
 
+#: Discuz 附件图的 ``file=`` 属性（真实封面/详情图长这样：懒加载缩略图
+#: 的真实地址放在 ``file``，``src`` 留空或占位）。
+_FILE_ATTR_RE = re.compile(r'\bfile="(https?://[\w.-]*imgccc\.com/[^"]+)"')
+
 #: 会话失效信号（ARCHITECTURE.md §5.1.1）。
 _LOGIN_HINT = "您需要登录"
 
@@ -408,8 +412,18 @@ def parse_thread_detail(html: str, tid: int) -> ThreadDetail:
 
     ed2k = extract_ed2k(html)
 
-    # 封面 / 详情图：正文里的 imgccc 链接，按出现顺序取前两张
-    imgs = _unique(_IMGCCC_RE.findall(body_html or raw))
+    # 封面 / 详情图：正文里的 imgccc 链接，按出现顺序取前两张。
+    # 优先取 Discuz 附件图的 ``file=`` 属性——发帖模板会在正文开头塞进
+    # 一段广告（``<div class="z"><a><img src="广告图.gif">``），裸 ``src``
+    # 提取会把广告当封面；附件图的地址在 ``file`` 属性里，天然绕开广告。
+    # ``file`` 提不到（旧帖版式不同）再退回全文匹配，并过滤掉广告图床
+    # 特征（GIF 动图横幅）。
+    imgs = _unique(_FILE_ATTR_RE.findall(body_html or raw))
+    if not imgs:
+        imgs = _unique(
+            u for u in _IMGCCC_RE.findall(body_html or raw)
+            if not u.lower().endswith(".gif")
+        )
 
     actress = _first_group(_RE_ACTRESS, raw)
     release = _release_date(raw)

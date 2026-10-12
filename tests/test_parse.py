@@ -261,6 +261,41 @@ def test_detail_ignores_duplicate_images():
     assert d.detail_img is None
 
 
+def test_detail_skips_ad_banner_inside_body():
+    """发帖模板的广告块（div.z + 裸 src GIF）不能被当成封面图。
+
+    2026-10 起论坛把广告横幅塞进了正文开头，裸 src 提取曾把广告 GIF
+    存成封面（tid=4034716 实测）。真实封面在附件图的 file 属性里。
+    """
+    html = (
+        '<td class="t_f">'
+        '<div class="z"><a href="/AllRes/y1685191.html">'
+        '<img src="https://www.imgccc.com/2026/08/12/ad.gif"></a></div>'
+        '<img id="aimg_X" class="zoom" '
+        'file="https://www.imgccc.com/2026/10/11/cover.jpg" />'
+        '<img id="aimg_Y" class="zoom" '
+        'file="https://www.imgccc.com/2026/10/11/detail.jpg" />'
+        "</td>"
+    )
+    d = parse_thread_detail(html, 1)
+    assert d.cover_img == "https://www.imgccc.com/2026/10/11/cover.jpg"
+    assert d.detail_img == "https://www.imgccc.com/2026/10/11/detail.jpg"
+
+
+def test_detail_fallback_filters_gif_ads():
+    """没有 file 属性可取时退回 src 提取，但滤掉 GIF 广告图。"""
+    html = (
+        '<td class="t_f">'
+        '<img src="https://www.imgccc.com/2026/08/12/ad.gif">'
+        '<img src="https://www.imgccc.com/2026/10/11/cover.jpg">'
+        '<img src="https://www.imgccc.com/2026/10/11/detail.jpg">'
+        "</td>"
+    )
+    d = parse_thread_detail(html, 1)
+    assert d.cover_img == "https://www.imgccc.com/2026/10/11/cover.jpg"
+    assert d.detail_img == "https://www.imgccc.com/2026/10/11/detail.jpg"
+
+
 def test_detail_cleans_html_entities():
     html = '<td class="t_f">出演者：&nbsp;本庄鈴&nbsp;</td>'
     d = parse_thread_detail(html, 1)
