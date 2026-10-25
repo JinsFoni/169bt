@@ -334,7 +334,7 @@
   /* ---------- 渲染：卡片 ---------- */
 
   /**
-   * 原地同步某张卡的「下载」按钮（发送中/已发/下载 + 禁用态 + 提示）。
+   * 原地同步某张卡的「下载」按钮（发送中/已下载/下载 + 禁用态 + 提示）。
    *
    * ★ 只改这一张卡的 DOM，**不调 render()**：render 会用 innerHTML 重建
    *   整个网格，所有卡片重放 cardIn 入场动画、图片重新加载——这就是
@@ -366,7 +366,7 @@
     btn.textContent = '';
     btn.insertAdjacentHTML('beforeend',
       '<svg viewBox="0 0 20 20"><path d="M10 3.5v9m0 0 3.5-3.5M10 12.5 6.5 9M4 16.5h12"/></svg>' +
-      (sending ? '发送中' : (p.tg_sent_at ? '已发' : '下载')));
+      (sending ? '发送中' : (p.tg_sent_at ? '已下载' : '下载')));
   }
 
   function cardHTML(p, idx) {
@@ -432,7 +432,7 @@
                             ? ' title="转发到 Telegram，由 Bot 侧下载"'
                             : ' title="尚未配置 Telegram，请先到设置页填写"')))) + '>' +
               '<svg viewBox="0 0 20 20"><path d="M10 3.5v9m0 0 3.5-3.5M10 12.5 6.5 9M4 16.5h12"/></svg>' +
-              (tgSendingTids[p.tid] ? '发送中' : (p.tg_sent_at ? '已发' : '下载')) + '</button>' +
+              (tgSendingTids[p.tid] ? '发送中' : (p.tg_sent_at ? '已下载' : '下载')) + '</button>' +
             '<button class="act act-del" type="button" data-act="del" title="删除这条记录" aria-label="删除">' +
               '<svg viewBox="0 0 20 20"><path d="M4 6.5h12M8.5 6.5V5a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v1.5M6 6.5l.7 8.4a1 1 0 0 0 1 .9h4.6a1 1 0 0 0 1-.9l.7-8.4"/></svg>' +
             '</button>' +
