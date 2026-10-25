@@ -12,9 +12,9 @@
   --ink-500: #232C3D;
 
   /* 强调 */
-  --accent:      #4C8DFF;
-  --accent-soft: #93BBFF;
-  --accent-deep: #2A5CBF;
+  --accent:      #4593FF;
+  --accent-soft: #7CB9FF;
+  --accent-deep: #0F5FFF;
   --cyan:       #5EC8C8;
 
   /* 文字（均满足 WCAG AA 4.5:1，最暗一级为 5.2:1）*/
@@ -74,7 +74,7 @@ body::before {
   inset: 0;
   pointer-events: none;
   background:
-    radial-gradient(1100px 620px at 12% -8%, rgba(76,141,255,.055), transparent 70%),
+    radial-gradient(1100px 620px at 12% -8%, rgba(69,147,255,.055), transparent 70%),
     radial-gradient(900px 520px at 88% 0%, rgba(94,200,200,.035), transparent 72%);
   z-index: 0;
 }
@@ -118,7 +118,7 @@ body::before {
   width: 9px; height: 9px;
   border-radius: 2px;
   background: var(--accent);
-  box-shadow: 0 0 12px rgba(76,141,255,.65);
+  box-shadow: 0 0 12px rgba(69,147,255,.65);
 }
 
 .brand-text {
@@ -164,11 +164,11 @@ body::before {
   height: 30px;
   padding: 0;
   justify-content: center;
-  background: rgba(76,141,255,.07);
-  border-color: rgba(76,141,255,.28);
+  background: rgba(69,147,255,.07);
+  border-color: rgba(69,147,255,.28);
   color: var(--accent-soft);
 }
-.btn-icon:hover { color: var(--accent-soft); border-color: rgba(76,141,255,.5); background: rgba(76,141,255,.14); }
+.btn-icon:hover { color: var(--accent-soft); border-color: rgba(69,147,255,.5); background: rgba(69,147,255,.14); }
 
 .btn-icon.btn-dl { color: #5FC46E; border-color: rgba(95,196,110,.3); background: rgba(95,196,110,.07); }
 .btn-icon.btn-dl:hover { color: #7DD98A; border-color: rgba(95,196,110,.55); background: rgba(95,196,110,.16); }
@@ -353,7 +353,7 @@ body::before {
 .datepick-day.is-off { color: var(--ink-500); cursor: default; }
 
 /* 采集是**区间**：把另一端的当前值描一圈，选的时候看得见「从这个到那个」 */
-.datepick-day.is-bound { box-shadow: inset 0 0 0 1px rgba(76,141,255,.5); }
+.datepick-day.is-bound { box-shadow: inset 0 0 0 1px rgba(69,147,255,.5); }
 
 /* ---------- 采集月历（顶栏月历的同款变体）----------
 
@@ -667,8 +667,8 @@ body::before {
 .act:hover { background: rgba(255,255,255,.1); color: var(--text); border-color: var(--line-strong); }
 .act:active { transform: scale(.975); }
 
-.act-copy { color: var(--accent-soft); border-color: rgba(76,141,255,.28); background: rgba(76,141,255,.07); }
-.act-copy:hover { color: var(--accent-soft); border-color: rgba(76,141,255,.5); background: rgba(76,141,255,.14); }
+.act-copy { color: var(--accent-soft); border-color: rgba(69,147,255,.28); background: rgba(69,147,255,.07); }
+.act-copy:hover { color: var(--accent-soft); border-color: rgba(69,147,255,.5); background: rgba(69,147,255,.14); }
 
 /* 下载按钮：绿色标识 */
 .act-dl { color: #5FC46E; border-color: rgba(95,196,110,.3); background: rgba(95,196,110,.07); }
@@ -849,7 +849,7 @@ body::before {
 }
 .toast.ok  .toast-icon { background: var(--cyan); box-shadow: 0 0 10px rgba(94,200,200,.6); }
 .toast.err .toast-icon { background: var(--danger); box-shadow: 0 0 10px rgba(224,87,74,.6); }
-.toast.info .toast-icon { background: var(--accent); box-shadow: 0 0 10px rgba(76,141,255,.6); }
+.toast.info .toast-icon { background: var(--accent); box-shadow: 0 0 10px rgba(69,147,255,.6); }
 
 .toast-msg { flex: 1; }
 
@@ -866,7 +866,7 @@ body::before {
   white-space: nowrap;
   transition: background .16s var(--ease);
 }
-.toast-undo:hover { background: rgba(76,141,255,.16); }
+.toast-undo:hover { background: rgba(69,147,255,.16); }
 
 /* ============================ 设置弹窗（居中悬浮卡片） ============================ */
 
@@ -978,8 +978,8 @@ body::before {
 .dnav svg { width: 15px; height: 15px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .dnav:hover { background: rgba(255,255,255,.05); color: var(--text); }
 .dnav[aria-selected="true"] {
-  background: rgba(76,141,255,.11);
-  border-color: rgba(76,141,255,.28);
+  background: rgba(69,147,255,.11);
+  border-color: rgba(69,147,255,.28);
   color: var(--accent-soft);
   font-weight: 600;
 }
@@ -1062,8 +1062,8 @@ body::before {
 .input:hover { border-color: var(--line-strong); }
 .input:focus {
   outline: none;
-  border-color: rgba(76,141,255,.6);
-  box-shadow: 0 0 0 3px rgba(76,141,255,.14);
+  border-color: rgba(69,147,255,.6);
+  box-shadow: 0 0 0 3px rgba(69,147,255,.14);
 }
 
 /* 等宽仅用于真标识符：Key / Token / Chat ID / 地址 */
@@ -1111,8 +1111,8 @@ select.input {
   transition: background .16s var(--ease), color .16s var(--ease);
 }
 .reveal svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
-.reveal:hover { background: rgba(76,141,255,.12); color: var(--accent-soft); }
-.reveal[aria-pressed="true"] { color: var(--accent); background: rgba(76,141,255,.14); }
+.reveal:hover { background: rgba(69,147,255,.12); color: var(--accent-soft); }
+.reveal[aria-pressed="true"] { color: var(--accent); background: rgba(69,147,255,.14); }
 
 /* ---------- 主按钮（主题蓝实心，现有 .btn 只有幽灵态） ---------- */
 
@@ -1277,8 +1277,8 @@ select.input {
 
 /* 展开态与 .input:focus 同款描边，让「这块正开着」看得出来 */
 .datefield[aria-expanded="true"] {
-  border-color: rgba(76,141,255,.6);
-  box-shadow: 0 0 0 3px rgba(76,141,255,.14);
+  border-color: rgba(69,147,255,.6);
+  box-shadow: 0 0 0 3px rgba(69,147,255,.14);
 }
 .datefield[aria-expanded="true"] .datefield-icon { color: var(--accent); }
 
@@ -1296,9 +1296,9 @@ select.input {
   align-items: center;
   padding: 4px 10px;
   margin-right: 10px;
-  border: 1px solid rgba(76,141,255,.42);
+  border: 1px solid rgba(69,147,255,.42);
   border-radius: var(--r-pill);
-  background: rgba(76,141,255,.10);
+  background: rgba(69,147,255,.10);
   color: var(--accent);
   font-size: 12px;
   font-weight: 500;
@@ -1360,8 +1360,8 @@ select.input {
   transition: background .16s var(--ease), color .16s var(--ease), border-color .16s var(--ease);
 }
 .chip:hover {
-  background: rgba(76,141,255,.12);
-  border-color: rgba(76,141,255,.4);
+  background: rgba(69,147,255,.12);
+  border-color: rgba(69,147,255,.4);
   color: var(--accent-soft);
 }
 
