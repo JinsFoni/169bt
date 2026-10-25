@@ -441,15 +441,36 @@
         采集指定日期范围内发布的全部帖子。数据库里已有的会跳过，不会重复采集。
       </p>
 
+      <!-- 日期字段是**按钮**，点开顶栏同款月历。
+           原生 <input type="date"> 的弹层由系统绘制（Chrome/macOS 是那块
+           浅灰日历），改不动一个像素，与「深墨蓝 + 黄铜」的设计系统格格不入。 -->
       <div class="collect-dates">
-        <label class="field">
-          <span class="field-label">起始日期</span>
-          <input class="input" type="date" id="collectFrom" required>
-        </label>
-        <label class="field">
-          <span class="field-label">结束日期</span>
-          <input class="input" type="date" id="collectTo" required>
-        </label>
+        <div class="field">
+          <span class="field-label" id="collectFromLabel">起始日期</span>
+          <button class="input datefield" type="button" id="collectFrom"
+                  aria-haspopup="dialog" aria-expanded="false"
+                  aria-labelledby="collectFromLabel collectFromValue">
+            <svg class="datefield-icon" viewBox="0 0 20 20" aria-hidden="true">
+              <rect x="2.75" y="4.25" width="14.5" height="13" rx="2.5"/>
+              <path d="M2.75 8.25h14.5M6.75 2.75v3M13.25 2.75v3"/>
+            </svg>
+            <span class="datefield-value" id="collectFromValue">—</span>
+            <span class="datefield-wd" id="collectFromWd"></span>
+          </button>
+        </div>
+        <div class="field">
+          <span class="field-label" id="collectToLabel">结束日期</span>
+          <button class="input datefield" type="button" id="collectTo"
+                  aria-haspopup="dialog" aria-expanded="false"
+                  aria-labelledby="collectToLabel collectToValue">
+            <svg class="datefield-icon" viewBox="0 0 20 20" aria-hidden="true">
+              <rect x="2.75" y="4.25" width="14.5" height="13" rx="2.5"/>
+              <path d="M2.75 8.25h14.5M6.75 2.75v3M13.25 2.75v3"/>
+            </svg>
+            <span class="datefield-value" id="collectToValue">—</span>
+            <span class="datefield-wd" id="collectToWd"></span>
+          </button>
+        </div>
       </div>
 
       <div class="collect-quick" role="group" aria-label="快捷范围">
@@ -493,6 +514,26 @@
       <button class="btn btn-primary" id="collectStart" type="button">开始采集</button>
     </footer>
 
+  </div>
+
+  <!-- 采集日期月历：与顶栏月历（#datePick）同一套样式与键盘行为，
+       只是浮在哪个字段下方由 collect.js 按字段矩形算（position: fixed，
+       因此不会被 .collect-body 的滚动裁掉）。 -->
+  <div class="datepick is-anchored" id="collectCal" role="dialog" aria-modal="false"
+       aria-label="选择采集日期" hidden>
+    <div class="datepick-head">
+      <button class="nav-btn" id="collectCalPrev" type="button" aria-label="上个月">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M12.5 4.5 7 10l5.5 5.5"/></svg>
+      </button>
+      <span class="datepick-title" id="collectCalTitle"></span>
+      <button class="nav-btn" id="collectCalNext" type="button" aria-label="下个月">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7.5 4.5 13 10l-5.5 5.5"/></svg>
+      </button>
+    </div>
+    <div class="datepick-grid" id="collectCalGrid"></div>
+    <p class="datepick-legend">
+      <span class="datepick-legend-dot" aria-hidden="true"></span>已有归档（采集会跳过）
+    </p>
   </div>
 </div>
 

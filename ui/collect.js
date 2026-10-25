@@ -29,8 +29,17 @@
   var closeBtn  = $('collectClose');
   var formView  = $('collectForm');
   var progView  = $('collectProgress');
-  var fromInput = $('collectFrom');
-  var toInput   = $('collectTo');
+  var fromBtn   = $('collectFrom');
+  var toBtn     = $('collectTo');
+  var fromVal   = $('collectFromValue');
+  var toVal     = $('collectToValue');
+  var fromWd    = $('collectFromWd');
+  var toWd      = $('collectToWd');
+  var cal       = $('collectCal');
+  var calPrev   = $('collectCalPrev');
+  var calNext   = $('collectCalNext');
+  var calTitle  = $('collectCalTitle');
+  var calGrid   = $('collectCalGrid');
   var startBtn  = $('collectStart');
   var pollBtn   = $('collectPoll');
   var cancelBtn = $('collectCancel');
@@ -54,6 +63,20 @@
   var view      = 'form';   // 'form' | 'progress' | 'background'
   var lastFocus = null;
 
+  /* 日期字段状态。★ 不再是 <input> 的 value，改由这里持有：
+     原生 date 控件的弹层是系统画的（Chrome/macOS 一块灰白日历），
+     配色、圆角、强调色全都改不动，也不认识「哪几天已有归档」。 */
+  var fromISO   = '';
+  var toISO     = '';
+  var calFor    = null;     // 'from' | 'to' | null（月历开着 = 不为 null）
+  var calYM     = null;     // '2026-10'
+  var archiveDays = null;   // {'2026-09-14': 13} 有归档的日期 → 帖数；null = 未取
+  var renderingCal = false; // 正在重绘网格（此期间的 focusout 是重绘副作用）
+
+  var MAX_SPAN = 366;       // 与后端 MAX_BACKFILL_DAYS 对齐（M-9）
+  var CAL_WD   = ['一', '二', '三', '四', '五', '六', '日'];  // 周一为首，与顶栏月历一致
+  var CAL_WD_FULL = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+
   /* ---------- 工具 ---------- */
 
   function pad(n) { return n < 10 ? '0' + n : String(n); }
@@ -75,6 +98,195 @@
     if (typeof window.toast === 'function') window.toast(msg, kind, opts);
   }
 
+  /* ---------- 日期字段与月历 ----------
+
+     ★ 视觉与交互**复用顶栏月历**（index.html #datePick + app.js 的
+       renderPick）：同一个 .datepick 类，黄铜选中态、置灰不可选、黄铜圆点、
+       圆角投影全部继承。差异只在语义——顶栏是「跳到某个归档日」，
+       这里是「选一个区间端点」：
+
+       · 可选范围：不晚于今天（未来没有帖子可采），起始不晚于结束
+         （选起始时以结束为上界，反之以下界）；
+       · 跨度上限 366 天（M-9）：超出跨度的日子直接置灰，
+         不让人跨 500 天填完再吃后端 400；
+       · 有归档的日子带圆点（「这些天采过了」），但**仍可点**——
+         按 tid 判重，重采一天是合法操作（重试失败帖）。
+  */
+
+  function parseISO(iso) {
+    var p = iso.split('-');
+    return new Date(+p[0], +p[1] - 1, +p[2]);
+  }
+
+  /** 两个 ISO 日期相差的天数（b - a）。本地日历算，跨 DST 也稳。 */
+  function daySpan(a, b) {
+    return Math.round((parseISO(b) - parseISO(a)) / 86400000);
+  }
+
+  function wdOf(iso) { return CAL_WD_FULL[parseISO(iso).getDay()]; }
+
+  /** 写入一端并刷新字段显示（value 文本 + 周几）。 */
+  function setDate(which, iso) {
+    if (which === 'from') {
+      fromISO = iso;
+      fromVal.textContent = iso;
+      fromWd.textContent = wdOf(iso);
+      fromBtn.title = '起始日期 ' + iso + ' ' + wdOf(iso);
+    } else {
+      toISO = iso;
+      toVal.textContent = iso;
+      toWd.textContent = wdOf(iso);
+      toBtn.title = '结束日期 ' + iso + ' ' + wdOf(iso);
+    }
+  }
+
+  /* 归档日圆点。★ 取不到就静默无圆点：圆点只是提示，
+     没它照样能选日期，不该为此弹错（离线/门禁未过都属正常态）。 */
+  function loadArchiveDays() {
+    if (archiveDays) { renderCal(); return; }
+    if (!window.api) return;
+    window.api.getDates().then(function (rows) {
+      archiveDays = {};
+      (rows || []).forEach(function (r) { archiveDays[r.date] = r.count; });
+      if (calFor) renderCalKeepingFocus();
+    }).catch(function () { archiveDays = {}; });
+  }
+
+  /* 重绘时保住焦点。
+     ★ 圆点是异步取回来的：面板先出、圆点后到，重绘会把正被聚焦的日子
+       换掉 → 焦点掉回 body → focusout 把面板收起来（用户会看到面板
+       自己闪一下消失）。这里记住打开的那一天，重绘后再聚焦回去。 */
+  function renderCalKeepingFocus() {
+    var focused = document.activeElement;
+    var keep = focused && focused.dataset ? focused.dataset.date : null;
+    renderCal();
+    if (keep) {
+      var again = calGrid.querySelector('[data-date="' + keep + '"]');
+      if (again) again.focus();
+    }
+  }
+
+  function openCal(which) {
+    if (calFor === which) { closeCal(true); return; }   // 再点同一个字段 = 收起
+    var anchor = which === 'from' ? fromISO : toISO;
+    calFor = which;
+    calYM = (anchor || today()).slice(0, 7);
+    cal.hidden = false;
+    fromBtn.setAttribute('aria-expanded', String(which === 'from'));
+    toBtn.setAttribute('aria-expanded', String(which === 'to'));
+    renderCal();
+    positionCal();
+    loadArchiveDays();
+
+    // 焦点进面板：键盘用户直接落在当前值上，方向键就能挪
+    var sel = calGrid.querySelector('.is-active') ||
+              calGrid.querySelector('button[data-date]');
+    if (sel) sel.focus();
+  }
+
+  function closeCal(refocus) {
+    if (!calFor) return;
+    var btn = calFor === 'from' ? fromBtn : toBtn;
+    calFor = null;
+    cal.hidden = true;
+    fromBtn.setAttribute('aria-expanded', 'false');
+    toBtn.setAttribute('aria-expanded', 'false');
+    if (refocus) btn.focus();
+  }
+
+  /** 浮在字段下方；下方放不下就翻到上方，窄屏收进视口。 */
+  function positionCal() {
+    if (!calFor) return;
+    var btn = calFor === 'from' ? fromBtn : toBtn;
+    var r = btn.getBoundingClientRect();
+    var vw = document.documentElement.clientWidth;
+    var vh = document.documentElement.clientHeight;
+    var w = Math.min(288, vw - 24);
+    var h = cal.offsetHeight || 320;
+
+    cal.style.width = w + 'px';
+    cal.style.left = Math.max(12, Math.min(r.left, vw - w - 12)) + 'px';
+    var top = r.bottom + 8;
+    if (top + h > vh - 12) top = Math.max(12, r.top - h - 8);
+    cal.style.top = top + 'px';
+  }
+
+  function renderCal() {
+    renderingCal = true;          // 重绘期间的 focusout 不算「Tab 离开」
+    var p = calYM.split('-');
+    var y = +p[0], m = +p[1];
+    calTitle.textContent = y + ' 年 ' + m + ' 月';
+
+    var todayISO = today();
+    calNext.disabled = calYM >= todayISO.slice(0, 7);   // 未来月份没有可采的日子
+    calPrev.disabled = false;                          // 往回不设界（跨度在日子里拦）
+
+    var sel = calFor === 'from' ? fromISO : toISO;
+    // 区间另一端：既是边界，也是描一圈提示「从这个到那个」
+    var startBound = calFor === 'to'   ? fromISO : null;
+    var endBound   = calFor === 'from' ? toISO   : null;
+
+    // 周一为首列；首尾补位格 visibility:hidden 保列对齐（同顶栏月历）
+    var lead = (new Date(y, m - 1, 1).getDay() + 6) % 7;
+    var nDays = new Date(y, m, 0).getDate();
+
+    var html = CAL_WD.map(function (w) {
+      return '<span class="datepick-wd">' + w + '</span>';
+    }).join('');
+
+    for (var b = 0; b < lead; b++) {
+      html += '<span class="datepick-day is-out"></span>';
+    }
+
+    for (var d = 1; d <= nDays; d++) {
+      var iso = calYM + '-' + pad(d);
+      var off = iso > todayISO;
+      if (!off && startBound && iso < startBound) off = true;   // 早于起始
+      if (!off && endBound && iso > endBound) off = true;       // 晚于结束
+      if (!off && startBound && daySpan(startBound, iso) + 1 > MAX_SPAN) off = true;
+      if (!off && endBound && daySpan(iso, endBound) + 1 > MAX_SPAN) off = true;
+
+      var count = archiveDays && archiveDays[iso];
+      var cls = 'datepick-day' +
+                (count ? ' has-posts' : '') +
+                (iso === sel ? ' is-active' : '') +
+                (iso === startBound || iso === endBound ? ' is-bound' : '');
+
+      if (off) {
+        // <span> 而非 <button disabled>：不可选的日子 Tab 也不该经过（同顶栏月历）
+        html += '<span class="' + cls + ' is-off" aria-hidden="true">' + d + '</span>';
+      } else {
+        var label = iso + ' ' + wdOf(iso) + (count ? '，已归档 ' + count + ' 帖' : '');
+        html += '<button class="' + cls + '" type="button" data-date="' + iso + '"' +
+                ' aria-label="' + label + '"' +
+                ' title="' + label + '">' + d + '</button>';
+      }
+    }
+    calGrid.innerHTML = html;
+    renderingCal = false;
+  }
+
+  function stepMonth(dir) {
+    var p = calYM.split('-');
+    var d = new Date(+p[0], +p[1] - 1 + dir, 1);
+    var ym = d.getFullYear() + '-' + pad(d.getMonth() + 1);
+    if (ym > today().slice(0, 7)) return;    // 未来的月份：按钮已禁用，双保险
+    calYM = ym;
+    renderCal();
+    positionCal();
+  }
+
+  function commitDate(iso) {
+    if (calFor === 'from') {
+      setDate('from', iso);
+      if (toISO && toISO < iso) setDate('to', iso);      // 防御：端点不该倒置
+    } else {
+      setDate('to', iso);
+      if (fromISO && fromISO > iso) setDate('from', iso);
+    }
+    closeCal(true);
+  }
+
   /* ---------- 视图切换 ---------- */
 
   /**
@@ -84,6 +296,7 @@
    */
   function adopt(job) {
     stopPoll();
+    closeCal(false);                 // 表单要藏起来了，月历不该浮在进度态上
     jobId = job.id;
     view = 'progress';
     formView.hidden = true;
@@ -157,10 +370,13 @@
       return;
     }
 
-    if (!fromInput.value) {
-      fromInput.value = daysAgo(2);
-      toInput.value = today();
+    if (!fromISO || !toISO) {
+      setDate('from', daysAgo(2));
+      setDate('to', today());
     }
+    // 圆点是「这段日子里哪些已归档」的快照，每次打开重取：
+    // 上一轮采集可能刚补上新日期，缓存着会让提示说谎
+    archiveDays = null;
     // 回到表单（重开弹窗 = 想开新一轮），再按后端实况调整：
     // 有任务→进度态；无任务→留在表单，备注带一句上次结果
     showForm();
@@ -175,11 +391,12 @@
       }
     }).catch(function () { /* 后端不可达时仍允许填表，提交时报错 */ });
 
-    fromInput.focus();
+    fromBtn.focus();
   }
 
   function close() {
     if (view === 'progress' && jobId) return;   // 采集中不允许误关（防御）
+    closeCal(false);
     modal.hidden = true;
     document.body.style.overflow = '';
     stopPoll();
@@ -302,8 +519,8 @@
   /* ---------- 动作 ---------- */
 
   function start() {
-    var from = fromInput.value;
-    var to = toInput.value;
+    var from = fromISO;
+    var to = toISO;
 
     if (!from || !to) {
       note.textContent = '请选择起始和结束日期。';
@@ -312,6 +529,12 @@
     }
     if (from > to) {
       note.textContent = '起始日期不能晚于结束日期。';
+      note.style.color = 'var(--danger)';
+      return;
+    }
+    var span = daySpan(from, to) + 1;
+    if (span > MAX_SPAN) {
+      note.textContent = '日期跨度最多 ' + MAX_SPAN + ' 天，当前 ' + span + ' 天。';
       note.style.color = 'var(--danger)';
       return;
     }
@@ -399,14 +622,74 @@
   modal.querySelectorAll('[data-quick]').forEach(function (btn) {
     btn.addEventListener('click', function () {
       var n = +btn.dataset.quick;
-      toInput.value = today();
-      fromInput.value = n === 1 ? today() : daysAgo(n - 1);
+      setDate('to', today());
+      setDate('from', n === 1 ? today() : daysAgo(n - 1));
+      closeCal(false);
     });
   });
+
+  /* ---- 日期字段 / 月历 ---- */
+
+  fromBtn.addEventListener('click', function () { openCal('from'); });
+  toBtn.addEventListener('click', function () { openCal('to'); });
+  calPrev.addEventListener('click', function () { stepMonth(-1); });
+  calNext.addEventListener('click', function () { stepMonth(1); });
+
+  calGrid.addEventListener('click', function (e) {
+    var btn = e.target.closest('[data-date]');
+    if (btn) commitDate(btn.dataset.date);
+  });
+
+  // 方向键在可选日子间移动（←/→ 一天，↑/↓ 一周），Enter/Space 由按钮原生处理
+  calGrid.addEventListener('keydown', function (e) {
+    var step = e.key === 'ArrowLeft' ? -1
+             : e.key === 'ArrowRight' ? 1
+             : e.key === 'ArrowUp' ? -7
+             : e.key === 'ArrowDown' ? 7 : 0;
+    if (!step) return;
+    var days = Array.prototype.slice.call(calGrid.querySelectorAll('button[data-date]'));
+    if (!days.length) return;
+    e.preventDefault();
+    var i = days.indexOf(document.activeElement);
+    i = i < 0 ? 0 : Math.max(0, Math.min(days.length - 1, i + step));
+    days[i].focus();
+  });
+
+  // 点面板外部关闭（mousedown 而非 click：拖选文字时不误关，同顶栏月历）
+  document.addEventListener('mousedown', function (e) {
+    if (!calFor) return;
+    if (cal.contains(e.target) || fromBtn.contains(e.target) || toBtn.contains(e.target)) return;
+    closeCal(false);
+  });
+
+  // Tab 走出面板就收起——键盘用户不该留下一块浮层在 Tab 序列外干等着。
+  // ★ relatedTarget 为空时**不能一律不关**：鼠标点在不可聚焦的东西上
+  //   （按钮里的 <span>、遮罩）也会触发 focusout，若照关，紧接着的 click
+  //   又会把它打开——同一字段点两次变成「关不上」。用 pointer 标记区分：
+  //   手势期间的 focusout 交给 mousedown 处理，键盘 Tab 出去的才关。
+  var pointerGesture = false;
+  document.addEventListener('mousedown', function () {
+    pointerGesture = true;
+    setTimeout(function () { pointerGesture = false; }, 0);
+  }, true);
+
+  cal.addEventListener('focusout', function (e) {
+    if (!calFor || renderingCal) return;
+    var next = e.relatedTarget;
+    if (!next && pointerGesture) return;
+    if (next && (cal.contains(next) || next === fromBtn || next === toBtn)) return;
+    closeCal(false);
+  });
+
+  // 字段会随窗口尺寸与 .collect-body 滚动而移动，月历得跟住
+  window.addEventListener('resize', positionCal);
+  document.addEventListener('scroll', positionCal, true);
 
   document.addEventListener('keydown', function (e) {
     if (modal.hidden) return;
     if (e.key !== 'Escape') return;
+    // 月历开着时 Esc 先关月历——不该一次把整个采集弹窗关掉
+    if (calFor) { closeCal(true); return; }
     if (view === 'progress' && jobId) toBackground();
     else close();
   });

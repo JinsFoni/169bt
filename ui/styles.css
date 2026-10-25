@@ -349,6 +349,47 @@ body::before {
   opacity: .75;
 }
 
+/* 采集月历里的「不可选」日（超出范围 / 未来）——用 <span>，Tab 不可达 */
+.datepick-day.is-off { color: var(--ink-500); cursor: default; }
+
+/* 采集是**区间**：把另一端的当前值描一圈，选的时候看得见「从这个到那个」 */
+.datepick-day.is-bound { box-shadow: inset 0 0 0 1px rgba(217,164,65,.5); }
+
+/* ---------- 采集月历（顶栏月历的同款变体）----------
+
+   ★ 只改**定位**，视觉一像素不动：同一个 .datepick 类复用
+     （黄铜选中、置灰、圆点、投影、圆角全部继承）。
+     顶栏那只是相对日期按钮绝对定位；弹窗里字段会移动、body 会滚动，
+     所以改成 fixed + 由 JS 按字段矩形给 left/top，并翻转到上方以免出屏。 */
+.datepick.is-anchored {
+  position: fixed;
+  top: auto;
+  left: auto;
+  right: auto;
+  z-index: 2;                  /* .collect 内部：压过遮罩(0)与面板(1) */
+  min-width: 0;                /* 宽度由 JS 按视口算（窄屏收窄） */
+  padding: 12px;
+}
+
+.datepick-legend {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 2px 0;
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--text-faint);
+  letter-spacing: .02em;
+}
+
+.datepick-legend-dot {
+  width: 4px; height: 4px;
+  border-radius: var(--r-pill);
+  background: var(--brass);
+  opacity: .75;
+  flex: 0 0 auto;
+}
+
 /* ============================ 网格 ============================ */
 
 .stage {
@@ -1202,6 +1243,45 @@ select.input {
   gap: 12px;
 }
 
+/* 日期字段：长得像 .input，整体是按钮。
+   ★ 不再用原生 <input type="date">：它的弹层由系统绘制，
+     深浅、圆角、强调色都不受控制，也没法显示「哪几天已有归档」。 */
+.datefield {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+
+.datefield-icon {
+  flex: 0 0 auto;
+  width: 15px; height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  color: var(--text-faint);
+  transition: color .16s var(--ease);
+}
+
+.datefield-value { flex: 1; min-width: 0; }
+
+.datefield-wd {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.datefield:hover .datefield-icon { color: var(--text-mid); }
+
+/* 展开态与 .input:focus 同款描边，让「这块正开着」看得出来 */
+.datefield[aria-expanded="true"] {
+  border-color: rgba(217,164,65,.6);
+  box-shadow: 0 0 0 3px rgba(217,164,65,.14);
+}
+.datefield[aria-expanded="true"] .datefield-icon { color: var(--brass); }
+
 .collect-quick {
   display: flex;
   flex-wrap: wrap;
@@ -1291,9 +1371,6 @@ select.input {
   line-height: 1.6;
   color: var(--text-dim);
 }
-
-/* 日期输入：日历图标在深色底上默认不可见，须反色 */
-.input[type="date"] { color-scheme: dark; }
 
 /* ---------- 采集进度 ---------- */
 
@@ -1407,6 +1484,9 @@ select.input {
   .grid { grid-template-columns: repeat(auto-fill, minmax(100%, 1fr)); }
   .date-display { min-width: 108px; }
   .date-value { font-size: 14.5px; }
+
+  /* 窄屏：起止日期各占一行，日期文本（+周几）才放得下 */
+  .collect-dates { grid-template-columns: 1fr; }
 
   /* 月历右对齐弹出，窄屏时收回视口内 */
   .datepick { position: fixed; top: 106px; left: 12px; right: 12px; min-width: 0; }
