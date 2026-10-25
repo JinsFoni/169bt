@@ -55,6 +55,11 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--to", dest="to_date", required=True,
                    metavar="YYYY-MM-DD", help="结束日期（含）")
     c.add_argument("--fid", default=config.DEFAULT_FID, help="版块 ID")
+    c.add_argument(
+        "--refetch",
+        action="store_true",
+        help="连已入库的帖子也重新抓详情页解析（站点改版后重解析历史用）",
+    )
 
     return p
 
@@ -375,8 +380,11 @@ def _cmd_collect(args: argparse.Namespace) -> int:
             images=ImageCache(config.IMAGE_DIR),
         )
         print(f"采集 {days[0]} ~ {days[-1]}（{len(days)} 天，fid={args.fid}）")
+        if args.refetch:
+            print("已入库的帖子也会重新抓一遍（--refetch）")
         result = collector.run(
             from_date=args.from_date, to_date=args.to_date, fid=args.fid,
+            refetch=args.refetch,
             on_progress=lambda j: print(
                 f"  [{j.processed}/{j.total}] 新增 {j.collected}"
                 f" 跳过 {j.skipped} 失败 {j.failed}",

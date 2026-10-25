@@ -25,6 +25,7 @@ from bt169.repo.collect import (
 from bt169.repo.posts import PostRepo
 from bt169.source.forum import FetchError, LoginRequired
 from bt169.source.parse import ListRow, ThreadDetail
+from dataclasses import replace
 
 
 # ------------------------------------------------------------ date_range
@@ -1046,3 +1047,103 @@ def test_job_done_callback_not_fired_when_nothing_collected(env):
     c.on_job_done = seen.append
     c.run(from_date="2026-09-14", to_date="2026-09-14")  # type: ignore[arg-type]
     assert seen == []
+
+
+# ------------------------------------------------------------ --refetch 重解析
+
+
+def test_refetch_reparses_settled_post(env):
+    """--refetch：已 done 的帖子也重抓详情页（站点改版后重解析历史）。
+
+    复现 2026-10-24 的事故：那天图床换了域名，解析器没认出来，12 条帖子
+    ``cover_img`` 全落成 NULL 却都进了终态 —— 不重解析就永远补不回来。
+    """
+    db, posts, jobs = env
+    posts.upsert_collected(
+        tid=101, title="标题 101", code="ABC-101", actress="某人",
+        release_date="2026-09-17", size="7GB",
+        cover_img=None, detail_img=None,
+        ed2k="ed2k://|file|101.mkv|1|AB|/",
+        post_date="2026-09-14", status="done",
+    )
+    fc = FakeForum(pages={1: rows((101, "2026-09-14"))},
+                   details={101: make_detail(101)})
+    c = Collector(client=fc, posts=posts, jobs=jobs)  # type: ignore[arg-type]
+
+    c.run(from_date="2026-09-14", to_date="2026-09-14", refetch=True)
+
+    assert fc.fetch_calls == [101]
+    post = posts.get(101)
+    assert post is not None
+    assert post.cover_img == "https://img.example/101.jpg"
+    assert post.detail_img == "https://img.example/101-d.jpg"
+
+
+def test_refetch_keeps_known_cover_when_reparse_misses_it(env):
+    """重解析没拿到图时，不能把库里已有的封面洗成 NULL。
+
+    ``upsert_collected`` 对 cover_img 是直接赋值（只有本地图路径带
+    COALESCE），所以这条兜底必须有——否则「重解析」反而成了删图工具。
+    """
+    db, posts, jobs = env
+    posts.upsert_collected(
+        tid=101, title="标题 101", code="ABC-101", actress="某人",
+        release_date="2026-09-17", size="7GB",
+        cover_img="https://img.example/old.jpg",
+        detail_img="https://img.example/old-d.jpg",
+        ed2k="ed2k://|file|101.mkv|1|AB|/",
+        post_date="2026-09-14", status="done",
+    )
+    detail = replace(make_detail(101), cover_img=None, detail_img=None)
+    fc = FakeForum(pages={1: rows((101, "2026-09-14"))}, details={101: detail})
+    c = Collector(client=fc, posts=posts, jobs=jobs)  # type: ignore[arg-type]
+
+    c.run(from_date="2026-09-14", to_date="2026-09-14", refetch=True)
+
+    post = posts.get(101)
+    assert post is not None
+    assert post.cover_img == "https://img.example/old.jpg"
+    assert post.detail_img == "https://img.example/old-d.jpg"
+
+
+def test_refetch_keeps_ed2k_when_reparse_is_locked(env):
+    """会话失效时重解析会把帖子看成「隐藏未解锁」——已有 ed2k 不能被抹掉。"""
+    db, posts, jobs = env
+    posts.upsert_collected(
+        tid=101, title="标题 101", code="ABC-101", actress="某人",
+        release_date="2026-09-17", size="7GB",
+        cover_img="https://img.example/101.jpg",
+        detail_img="https://img.example/101-d.jpg",
+        ed2k="ed2k://|file|101.mkv|1|AB|/",
+        post_date="2026-09-14", status="done",
+    )
+    fc = FakeForum(pages={1: rows((101, "2026-09-14"))},
+                   details={101: make_detail(101, ed2k=False, locked=True)})
+    c = Collector(client=fc, posts=posts, jobs=jobs)  # type: ignore[arg-type]
+
+    c.run(from_date="2026-09-14", to_date="2026-09-14", refetch=True)
+
+    post = posts.get(101)
+    assert post is not None
+    assert post.ed2k == "ed2k://|file|101.mkv|1|AB|/"
+    assert post.status == "done"
+
+
+def test_default_run_still_skips_settled_posts(env):
+    """反面对照：不加 --refetch 时，终态帖一律不打扰论坛。"""
+    db, posts, jobs = env
+    posts.upsert_collected(
+        tid=101, title="标题 101", code="ABC-101", actress="某人",
+        release_date="2026-09-17", size="7GB",
+        cover_img="https://img.example/101.jpg",
+        detail_img="https://img.example/101-d.jpg",
+        ed2k="ed2k://|file|101.mkv|1|AB|/",
+        post_date="2026-09-14", status="done",
+    )
+    fc = FakeForum(pages={1: rows((101, "2026-09-14"))},
+                   details={101: make_detail(101)})
+    c = Collector(client=fc, posts=posts, jobs=jobs)  # type: ignore[arg-type]
+
+    c.run(from_date="2026-09-14", to_date="2026-09-14")
+
+    assert fc.fetch_calls == []

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 from datetime import date, timedelta
 
@@ -31,7 +31,7 @@ from bt169.repo.collect import (
 )
 from bt169.repo.posts import PostRepo, now_iso
 from bt169.source.forum import FetchError, ForumClient, LoginRequired
-from bt169.source.parse import parse_rss, parse_thread_detail
+from bt169.source.parse import ThreadDetail, parse_rss, parse_thread_detail
 from bt169.source.thanks import ThanksClient, ThanksError
 
 from bt169.collector.imagecache import (
@@ -119,6 +119,17 @@ def date_range(from_date: str, to_date: str) -> list[str]:
     return [(start + timedelta(days=i)).isoformat() for i in range(span)]
 
 
+def _status_of(detail: ThreadDetail) -> str:
+    """按解析结果判定帖子状态。
+
+    ``pending`` = 有隐藏内容但没解锁（可再试）；``nolink`` = 页面上本来就
+    没有 ed2k（不必重试）；``done`` = 拿到了链接。
+    """
+    if detail.ed2k:
+        return "done"
+    return "pending" if detail.locked else "nolink"
+
+
 class Collector:
     """采集编排器。
 
@@ -167,6 +178,7 @@ class Collector:
         fid: str = config.DEFAULT_FID,
         job: CollectJob | None = None,
         on_progress: Callable[[CollectJob], None] | None = None,
+        refetch: bool = False,
     ) -> CollectResult:
         """执行一次采集（**阻塞**，调用方负责放到后台线程）。
 
@@ -175,6 +187,9 @@ class Collector:
                 为 ``None`` 时自行创建。
             on_progress: 每处理完一帖回调一次（CLI 打印进度用）。
                 回调抛异常**不会**中断采集——进度显示不该拖垮长任务。
+            refetch: 连**已入库的终态帖**也重新抓详情页解析。用于站点改版
+                后重解析历史（例如解析器新增了字段），默认 ``False`` 表示
+                「已归档的不再打扰论坛」。**会真的发请求**，受同样的限速。
 
         Raises:
             ValidateError: 日期非法。
@@ -187,7 +202,7 @@ class Collector:
                  job.id, from_date, to_date, fid)
         self._on_progress = on_progress
         try:
-            return self._run_job(job, days)
+            return self._run_job(job, days, refetch=refetch)
         except Exception as exc:  # noqa: BLE001 —— 必须落库后再抛
             log.exception("采集任务 %s 异常", job.id)
             # ★ 内层可能已经写了更具体的终态与说明（例如「会话失效：…」）。
@@ -199,7 +214,9 @@ class Collector:
                                   message=str(exc)[:500])
             raise
 
-    def _run_job(self, job: CollectJob, days: list[str]) -> CollectResult:
+    def _run_job(
+        self, job: CollectJob, days: list[str], *, refetch: bool = False
+    ) -> CollectResult:
         wanted = set(days)
 
         # ---------------- 阶段 1：发现
@@ -211,12 +228,12 @@ class Collector:
             job.id, phase="fetching", total=len(items), pages=pages,
             message=f"发现 {len(items)} 个帖子，开始抓取",
         )
-        return self.fetch_items(job, items)
+        return self.fetch_items(job, items, refetch=refetch)
 
     # ------------------------------------------------------------ 抓取阶段
 
     def fetch_items(
-        self, job: CollectJob, items: list[tuple[int, str]]
+        self, job: CollectJob, items: list[tuple[int, str]], *, refetch: bool = False
     ) -> CollectResult:
         """抓取一批 ``(tid, post_date)`` 并推进任务状态。
 
@@ -256,7 +273,7 @@ class Collector:
                                   message=f"已取消（已处理 {done} 个）")
                 return self._summarize(job.id)
 
-            if self._posts.is_settled(tid):
+            if not refetch and self._posts.is_settled(tid):
                 # ★ 只跳过**终态**（done / nolink）。
                 #   早先用 ``exists()``（任意状态都跳），配上「会话失效时
                 #   只标 pending」就成了一条死路：实测 13 帖匿名采成 pending
@@ -365,8 +382,8 @@ class Collector:
         解锁失败**不算采集失败**：帖子其余字段（番号/演员/封面）已拿到，
         先以 ``pending`` 入库，日后重跑可再试。
         """
-        detail = self._c.fetch_thread(tid)
-        status = "done" if detail.ed2k else ("pending" if detail.locked else "nolink")
+        detail = self._keep_known(tid, self._c.fetch_thread(tid))
+        status = _status_of(detail)
 
         if status == "pending" and self._thanks is not None:
             try:
@@ -380,11 +397,10 @@ class Collector:
                 # ★ 直接解析感谢流程里已经拿到的页面，不再多发一次请求。
                 #   解锁后正文会变（出现 ed2k 与附件块），必须重新解析。
                 if result.html:
-                    detail = parse_thread_detail(result.html, tid)
-                    status = (
-                        "done" if detail.ed2k
-                        else ("pending" if detail.locked else "nolink")
+                    detail = self._keep_known(
+                        tid, parse_thread_detail(result.html, tid)
                     )
+                    status = _status_of(detail)
 
         self._posts.upsert_collected(
             tid=tid,
@@ -399,6 +415,31 @@ class Collector:
             post_date=post_date,
             status=status,
             **self._localize(detail),
+        )
+
+    def _keep_known(self, tid: int, detail: ThreadDetail) -> ThreadDetail:
+        """本轮没解析到的字段，沿用库里已存的值（图床地址、ed2k）。
+
+        ★ 原样入库会把这些列覆盖成 NULL：``upsert_collected`` 对
+          ``cover_img`` / ``detail_img`` / ``ed2k`` 是**直接赋值**，只有本地
+          图路径带 COALESCE。于是图床抽风、页面改版、或解析刚好没命中时，
+          「早就存好的图/链接」会被一次失败的解析删掉——用户看到的是凭空
+          裂图，或一条已归档的帖子突然变回「没链接」。
+
+        ★ 只在**这个方向**兜底（新为空 → 用旧的）。新解析出地址就照常
+          更新，否则换了图床永远修不好。这也让 ``refetch`` 重解析历史时
+          不必担心把好数据洗成空的。
+        """
+        if detail.cover_img and detail.detail_img and detail.ed2k:
+            return detail
+        post = self._posts.get(tid)
+        if post is None:
+            return detail
+        return replace(
+            detail,
+            cover_img=detail.cover_img or post.cover_img,
+            detail_img=detail.detail_img or post.detail_img,
+            ed2k=detail.ed2k or post.ed2k,
         )
 
     def _localize(self, detail) -> dict[str, str | None]:  # type: ignore[no-untyped-def]
