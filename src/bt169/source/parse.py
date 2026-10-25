@@ -72,12 +72,29 @@ _RE_RELEASE = re.compile(r"商品発売日\s*[:：]\s*(\d{4})/(\d{1,2})/(\d{1,2}
 _RE_SIZE = re.compile(r"\[影片大小\]\s*[:：]\s*([^<\r\n]+)")
 _RE_TITLE_FIELD = re.compile(r"\[影片名称\]\s*[:：]\s*([^<\r\n]+)")
 
-#: 帖子内嵌的封面/详情图（imgccc 图床）。
-_IMGCCC_RE = re.compile(r"https?://[\w.-]*imgccc\.com/[^\s\"'<>]+")
+#: 正文图床白名单（``src`` 兜底路径用）。
+#:
+#: ★ **图床会换域名**，换的时候在这里登记一行即可：2026-10-24 起正文图从
+#:   ``imgccc.com`` 换到 ``imgly.net``，旧正则一条都匹配不到 → 整批帖子
+#:   ``cover_img`` 落成 NULL，前端全裂图（实测当天 12 帖全中）。
+#:
+#: ★ 不做「任意域名的图片都收」：正文里还有头像、徽章、广告横幅（GIF）、
+#:   站内表情（``/data/attachment/common/``），放开域名等于把它们当封面。
+_BODY_IMG_RE = re.compile(
+    r"https?://(?:[\w.-]*\.)?(?:imgccc\.com|imgly\.net)/[^\s\"'<>]+",
+    re.I,
+)
 
 #: Discuz 附件图的 ``file=`` 属性（真实封面/详情图长这样：懒加载缩略图
 #: 的真实地址放在 ``file``，``src`` 留空或占位）。
-_FILE_ATTR_RE = re.compile(r'\bfile="(https?://[\w.-]*imgccc\.com/[^"]+)"')
+#:
+#: ★ 同样**不绑定域名**，只认「``file=`` + 图片后缀」这个组合：广告横幅用的是
+#:   ``src``，天然绕开；``file`` 是发帖程序填的真实附件地址，换图床照样成立。
+#:   要求图片后缀是为了挡掉 ``file`` 指向种子/压缩包的帖子。
+_FILE_ATTR_RE = re.compile(
+    r"""\bfile=(["'])(https?://[^"']+?\.(?:jpe?g|png|webp|bmp)(?:\?[^"']*)?)\1""",
+    re.I,
+)
 
 #: 会话失效信号（ARCHITECTURE.md §5.1.1）。
 _LOGIN_HINT = "您需要登录"
@@ -412,16 +429,16 @@ def parse_thread_detail(html: str, tid: int) -> ThreadDetail:
 
     ed2k = extract_ed2k(html)
 
-    # 封面 / 详情图：正文里的 imgccc 链接，按出现顺序取前两张。
+    # 封面 / 详情图：正文里的图床链接，按出现顺序取前两张。
     # 优先取 Discuz 附件图的 ``file=`` 属性——发帖模板会在正文开头塞进
     # 一段广告（``<div class="z"><a><img src="广告图.gif">``），裸 ``src``
     # 提取会把广告当封面；附件图的地址在 ``file`` 属性里，天然绕开广告。
-    # ``file`` 提不到（旧帖版式不同）再退回全文匹配，并过滤掉广告图床
-    # 特征（GIF 动图横幅）。
-    imgs = _unique(_FILE_ATTR_RE.findall(body_html or raw))
+    # ``file`` 提不到（旧帖版式不同）再退回正文里的白名单图床匹配，
+    # 并过滤掉广告横幅的 GIF 特征。
+    imgs = _unique(m.group(2) for m in _FILE_ATTR_RE.finditer(body_html or raw))
     if not imgs:
         imgs = _unique(
-            u for u in _IMGCCC_RE.findall(body_html or raw)
+            u for u in _BODY_IMG_RE.findall(body_html or raw)
             if not u.lower().endswith(".gif")
         )
 

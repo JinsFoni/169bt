@@ -339,3 +339,47 @@ def test_strip_annotation_none():
     from bt169.source.parse import _strip_annotation
 
     assert _strip_annotation(None) is None
+
+
+def test_detail_attachment_on_switched_image_host():
+    """图床换域名后仍能取到封面（2026-10-24 由 imgccc 换到 imgly，实测事故）。
+
+    旧正则把域名写死成 ``imgccc\\.com``，换的那天起整批帖子
+    ``cover_img`` 全落成 NULL —— 前端十二条卡片一起裂图。
+    """
+    html = (
+        '<td class="t_f">'
+        '<img style="width:1200px;height:35%" '
+        'src="https://www.imgccc.com/2026/08/12/ad.gif">'
+        '<img id="aimg_A" class="zoom" src="" lazyloadthumb="1" '
+        'file="https://imgly.net/i/2026/10/24/cf13f470.jpg" />'
+        '<img id="aimg_B" class="zoom" src="" lazyloadthumb="1" '
+        'file="https://imgly.net/i/2026/10/24/6041ba04.jpg" />'
+        "</td>"
+    )
+    d = parse_thread_detail(html, 4069619)
+    assert d.cover_img == "https://imgly.net/i/2026/10/24/cf13f470.jpg"
+    assert d.detail_img == "https://imgly.net/i/2026/10/24/6041ba04.jpg"
+
+
+def test_detail_file_attr_is_host_agnostic():
+    """``file=`` 不绑域名：下一家图床（第三方）也不该失效；单引号同样要认。"""
+    html = (
+        "<td class=\"t_f\">"
+        "<img class=\"zoom\" file='https://pic.example.org/x/cover.png?a=1' />"
+        "</td>"
+    )
+    d = parse_thread_detail(html, 1)
+    assert d.cover_img == "https://pic.example.org/x/cover.png?a=1"
+
+
+def test_detail_file_attr_ignores_non_image_attachment():
+    """``file=`` 指向种子/压缩包时不算封面（要求图片后缀）。"""
+    html = (
+        '<td class="t_f">'
+        '<img src="https://www.imgccc.com/2026/10/11/cover.jpg">'
+        '<a file="https://169bt.com/attach/abc.torrent">种子下载</a>'
+        "</td>"
+    )
+    d = parse_thread_detail(html, 1)
+    assert d.cover_img == "https://www.imgccc.com/2026/10/11/cover.jpg"
