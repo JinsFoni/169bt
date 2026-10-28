@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
@@ -44,6 +45,10 @@ __all__ = [
     "LtxSource",
     "load_creds",
     "normalize_item",
+    "movie_id_from_url",
+    "code_key",
+    "female_actors",
+    "movie_actress",
     "JWT_KEY",
     "SYNCED_KEY",
     "cover_proxy_url",
@@ -230,6 +235,201 @@ def image_fetch(src_url: str, *, base_url: str) -> bytes:
     return resp.content
 
 
+# --------------------------------------------------------------------- 演员
+#
+# LTX 资源对象里**没有演员字段**（``/api/v1/articles/search`` 只给
+# ``number/title/magnet/preview_images/detail_url/…``，``actors`` 只出现在它
+# 自己的导入载荷 schema 里）。演员藏在 AVdb 的 **javdb 模块**后面：
+#
+#   ``detail_url = https://javdb.com/v/822NKW``   ← 末尾就是 javdb movie id
+#   ``GET /api/v1/javdb/movies/822NKW``           ← 无需鉴权（AVdb 用它自己的
+#                                                    javdb 账号代理），返回
+#                                                    ``actors[] / release_date /
+#                                                    maker_name / tags / series``
+#
+# ★ 为什么**懒加载**而不是同步时全量补：实测（2026-10）
+#   - 未缓存一次 0.6–14 秒（长尾严重），1164 条全量回填要 30–60 分钟；
+#   - **不能并发**：6 路并行 → 40/40 全 502（javdb 侧限流，用的是用户自己
+#     的 javdb 账号）；串行 +0.5 秒间隔 → 全成功；
+#   - AVdb 自己有缓存，同一 id 第二次 10–15 ms。
+#   所以做成「打开灯箱时查一条」，用户点开的那条 1 秒内就有，其余不付成本。
+
+#: javdb 详情页 URL → movie id。上游给的是 ``https://javdb.com/v/822NKW``，
+#: 镜像域名（``javdb580.com`` 等）路径一样，只认路径尾巴。
+_RE_MOVIE_URL = re.compile(r"/v/([0-9A-Za-z]{3,12})/?$")
+
+#: 编号归一：``NOSKN-095`` / ``noskn00095`` → ``NOSKN095``。
+#: 只用于**核对**取回的电影是不是同一条，不用于展示。
+_RE_CODE_NOISE = re.compile(r"[^0-9A-Za-z]+")
+
+#: javdb 的性别枚举：0 = 女，1 = 男。列表里男优女优混在一起。
+GENDER_FEMALE = 0
+
+
+def movie_id_from_url(url: str | None) -> str | None:
+    """从 ``detail_url`` 里抠出 javdb movie id；抠不到返回 ``None``。
+
+    ★ 不做「猜 id」：拿不到就退回按编号搜（:func:`movie_actress`），
+      因为瞎猜一个 id 会把**别人的**演员挂到这条资源上。
+    """
+    if not url:
+        return None
+    found = _RE_MOVIE_URL.search(url.strip())
+    return found.group(1) if found else None
+
+
+def code_key(number: str | None) -> str:
+    """编号归一（大写、去掉所有分隔符），用于跨源比对。"""
+    return _RE_CODE_NOISE.sub("", (number or "")).upper()
+
+
+def female_actors(movie: dict[str, Any]) -> list[str]:
+    """javdb 电影对象 → 女优名单（去重、保序、去空白）。"""
+    out: list[str] = []
+    for actor in movie.get("actors") or []:
+        if not isinstance(actor, dict):
+            continue
+        if actor.get("gender") != GENDER_FEMALE:
+            continue                      # 男优（如 今井勇太）不是我们要的
+        name = (actor.get("name") or "").strip()
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
+def _avdb_get(
+    base_url: str,
+    path: str,
+    *,
+    params: dict[str, Any] | None = None,
+    token: str | None = None,
+    http: Any = None,
+) -> dict[str, Any]:
+    """AVdb 的 GET + 信封解包（``{"code":0,"data":…}``）。
+
+    ``http`` 只用于测试注入（实现 ``get(url, params=…, timeout=…, headers=…)``）。
+
+    ★ ``trust_env=False``：与其它 AVdb 请求一致，局域网地址不能被环境变量
+      里的外网代理劫持。
+
+    ★ **必须带 JWT**：``/api/v1/javdb/*`` 在 OpenAPI 里写着 ``security: None``，
+      实测却不带令牌一律 **401** ``{"detail":"API Key 或 Token 鉴权失败"}``
+      （AVdb 有全局鉴权中间件，schema 没反映出来）。2026-10-28 实测。
+    """
+    url = f"{base_url.rstrip('/')}{path}"
+    headers = {"Accept": "application/json", "User-Agent": config.USER_AGENT}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        if http is not None:
+            resp = http.get(url, params=params, timeout=config.AVDB_TIMEOUT,
+                            headers=headers)
+        else:
+            resp = httpx.get(
+                url,
+                params=params,
+                timeout=config.AVDB_TIMEOUT,
+                headers=headers,
+                follow_redirects=True,
+                trust_env=False,
+            )
+    except Exception as exc:  # noqa: BLE001 — 网络层什么都可能抛
+        raise AvdbError(f"AVdb 请求失败：{exc}") from exc
+
+    status = getattr(resp, "status_code", 0)
+    text = getattr(resp, "text", "") or ""
+    if status == 401:
+        raise AvdbAuthError("AVdb 鉴权失败（账号密码或令牌无效）")
+    if status != 200:
+        # ★ 502 是这里的常客：javdb 详情走 AVdb 自己的账号，并发/限流时
+        #   上游直接 502。原样报出来，方便一眼看出是「上游忙」而不是坏数据。
+        raise AvdbError(f"AVdb 返回 HTTP {status}：{text[:200]}")
+
+    try:
+        payload = resp.json()
+    except Exception as exc:  # noqa: BLE001
+        raise AvdbError(f"AVdb 响应不是 JSON：{text[:200]}") from exc
+    if not isinstance(payload, dict):
+        raise AvdbError("AVdb 响应格式异常（不是对象）")
+    if payload.get("code") not in (0, None):
+        raise AvdbError(
+            f"AVdb 返回错误：{payload.get('message') or payload.get('code')}"
+        )
+    return payload
+
+
+def _search_movie_id(
+    base_url: str, number: str, *, token: str | None = None, http: Any = None
+) -> str | None:
+    """按编号搜 javdb，只认**编号完全一致**的结果。
+
+    ★ 不能拿第一条：``DPMI-020`` 的搜索结果里混着 ``DPMU-020``。搜错一条的
+      代价是把别人的女优名字挂到这条资源上——宁可没有。
+    """
+    if not number:
+        return None
+    payload = _avdb_get(
+        base_url,
+        "/api/v1/javdb/search",
+        params={"q": number, "limit": 10},
+        token=token,
+        http=http,
+    )
+    data = payload.get("data") or {}
+    wanted = code_key(number)
+    for movie in data.get("movies") or []:
+        if not isinstance(movie, dict):
+            continue
+        if code_key(movie.get("number")) == wanted and movie.get("id"):
+            return str(movie["id"])
+    return None
+
+
+def movie_actress(
+    base_url: str,
+    *,
+    detail_url: str | None = None,
+    number: str | None = None,
+    token: str | None = None,
+    http: Any = None,
+) -> tuple[str | None, str | None]:
+    """查一条资源的演员，返回 ``(演员串, movie_id)``。
+
+    两条路径：``detail_url`` 里有 id 就直接取详情；没有（本地镜像里约 20%
+    的条目）就按编号搜一次，只认编号完全匹配的结果。
+
+    查不到不算错——返回 ``(None, None)``。**上游失败才抛**
+    :class:`AvdbError`，让调用方区分「真没有」和「这次没问到」；
+    令牌失效抛 :class:`AvdbAuthError`（调用方用凭据重登一次再试）。
+
+    演员串用「、」连接（与 4K 侧「出演者」原文一样可能是多人）。
+    """
+    movie_id = movie_id_from_url(detail_url)
+    if movie_id is None:
+        movie_id = _search_movie_id(base_url, number or "", token=token, http=http)
+    if movie_id is None:
+        return None, None
+
+    payload = _avdb_get(
+        base_url, f"/api/v1/javdb/movies/{movie_id}", token=token, http=http
+    )
+    movie = (payload.get("data") or {}).get("movie") or {}
+    if not isinstance(movie, dict) or not movie:
+        return None, movie_id
+
+    # ★ 编号校验：AVdb 的 LTX 条目有时候会指向邻近的 javdb 页面。取回来的
+    #   电影编号与本地编号不一致时**放弃**，而不是把别人的女优写上。
+    if number and movie.get("number") and code_key(movie["number"]) != code_key(number):
+        log.info(
+            "LTX 演员：javdb %s 编号 %s 与资源 %s 不一致，跳过",
+            movie_id, movie.get("number"), number,
+        )
+        return None, movie_id
+
+    names = female_actors(movie)
+    return ("、".join(names) or None), movie_id
+
+
 # --------------------------------------------------------------------- 客户端
 
 
@@ -388,6 +588,23 @@ class LtxSource:
         return token
 
     # -- 对外
+
+    def token(self, *, force: bool = False) -> str:
+        """拿一个可用 JWT（同一个缓存在 ``ltx.jwt`` 里）。
+
+        ``force=True`` = 丢掉缓存重新登录——只给「401 后重试一次」用。
+        演员查询等**不走 ``fetch_all``** 的路径靠它拿令牌。
+        """
+        creds = load_creds(self._settings)
+        if not creds.configured:
+            raise AvdbNotConfigured(
+                "未配置 LTX 数据源：请到设置 → LTX 数据源填写 AVdb 地址与账号"
+            )
+        client = self._client(creds)
+        try:
+            return self._token(creds, client, force=force)
+        finally:
+            client.close()
 
     def configured(self) -> bool:
         return load_creds(self._settings).configured

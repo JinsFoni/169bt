@@ -173,15 +173,20 @@ MAX_BACKFILL_DAYS = 366
 AVDB_DEFAULT_BASE = "http://192.168.0.108:8000"
 
 #: LTX 板块在 AVdb 里的站点标识与版块名（实测：``website=ltx``，
-#: ``section=LTX破解``，该站总计 658 条，全部是 ed2k）。
+#: ``section=LTX破解``，全部是 ed2k）。条数会涨：2026-10-28 实测 1450 条。
 AVDB_LTX_WEBSITE = "ltx"
 AVDB_LTX_SECTION = "LTX破解"
 
 #: 单页条数。AVdb 的 ``ArticleQuery.page_size`` 上限是 100。
 AVDB_PAGE_SIZE = 100
 
-#: 翻页保护上限（658 条 ÷ 100 ≈ 7 页；20 页留足增长余量）。
-AVDB_MAX_PAGES = 20
+#: 翻页保护上限 —— 只在 ``hasMore`` 一直为真时兜底，**不是**条数上限。
+#:
+#: ★ 曾经写 20（配合当时的 658 条 / 7 页）。上游三周内涨到 1450 条（15 页），
+#:   再涨到 2000 条就会**静默截断**：同步「成功」了，但后半段资源根本不在
+#:   镜像里——用户只会发现某些日期的条目越来越少。翻页循环本身靠 ``hasMore``
+#:   和空页退出，这个数只防「上游撒谎导致死循环」，给足余量更安全。
+AVDB_MAX_PAGES = 100
 
 #: 请求超时（秒）。AVdb 在局域网内，正常 0.4 s 一页。
 AVDB_TIMEOUT = 30.0

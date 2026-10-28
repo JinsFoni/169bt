@@ -357,3 +357,211 @@ def test_image_fetch_raises_on_bad_status(monkeypatch):
     monkeypatch.setattr(avdb.httpx, "get", lambda url, **kw: R())
     with pytest.raises(AvdbError, match="封面下载失败"):
         image_fetch("https://img/a.jpg", base_url="http://avdb")
+
+
+# ---------------------------------------------------------------- 演员（懒加载）
+#
+# LTX 资源对象里没有演员字段；演员在 javdb 详情里（见 ``avdb.movie_actress``）。
+# 这几条钉住三件事：movie id 怎么从 detail_url 里抠、女优怎么从男女混排里
+# 挑出来、以及**绝不能把别人的女优挂到这条资源上**。
+
+
+class FakeGet:
+    """按路径分派的假 httpx.Client（只实现 GET）。"""
+
+    def __init__(self, routes):
+        self.routes = routes          # path 后缀 → Resp | callable(params)
+        self.calls = []               # [(url, params, headers)]
+        self.headers = []
+
+    def get(self, url, *, params=None, timeout=None, headers=None):
+        self.calls.append((url, params or {}))
+        self.headers.append(headers or {})
+        for suffix, resp in self.routes.items():
+            if url.endswith(suffix):
+                return resp(params or {}) if callable(resp) else resp
+        raise AssertionError(f"未预期的 URL：{url}")
+
+
+def _movie_payload(number="SSIS-157", actors=None, movie_id="mk01"):
+    return Resp(200, {
+        "code": 0,
+        "data": {
+            "movie": {
+                "id": movie_id,
+                "number": number,
+                "actors": actors if actors is not None else [
+                    {"id": "a1", "name": "三上悠亜", "gender": 0},
+                    {"id": "a2", "name": "今井勇太", "gender": 1},
+                    {"id": "a3", "name": " ", "gender": 0},
+                ],
+            }
+        },
+    })
+
+
+def test_movie_id_from_url_reads_path_tail():
+    assert avdb.movie_id_from_url("https://javdb.com/v/822NKW") == "822NKW"
+    assert avdb.movie_id_from_url("https://javdb580.com/v/2mK52X/") == "2mK52X"
+
+
+def test_movie_id_from_url_rejects_non_movie_urls():
+    assert avdb.movie_id_from_url(None) is None
+    assert avdb.movie_id_from_url("") is None
+    assert avdb.movie_id_from_url("https://javdb.com/v/x") is None      # 太短
+    assert avdb.movie_id_from_url("https://javdb.com/actors/eJmE") is None
+
+
+def test_code_key_normalizes_separators():
+    assert avdb.code_key("noskn-095") == "NOSKN095"
+    assert avdb.code_key(" NOSKN_095 ") == "NOSKN095"
+    assert avdb.code_key(None) == ""
+
+
+def test_female_actors_drops_male_and_blanks():
+    movie = {"actors": [
+        {"name": "三上悠亜", "gender": 0},
+        {"name": "今井勇太", "gender": 1},
+        {"name": "  ", "gender": 0},
+        {"name": "三上悠亜", "gender": 0},       # 去重
+        "not-a-dict",
+    ]}
+    assert avdb.female_actors(movie) == ["三上悠亜"]
+    assert avdb.female_actors({}) == []
+
+
+def test_movie_actress_uses_detail_url_directly():
+    http = FakeGet({"/api/v1/javdb/movies/mk01": _movie_payload()})
+    names, movie_id = avdb.movie_actress(
+        "http://avdb", detail_url="https://javdb.com/v/mk01", number="SSIS-157", http=http
+    )
+    assert (names, movie_id) == ("三上悠亜", "mk01")
+    # 有 id 就不搜：只发了一次请求
+    assert len(http.calls) == 1
+
+
+def test_movie_actress_searches_by_number_when_url_missing():
+    search = Resp(200, {"code": 0, "data": {"movies": [
+        {"id": "other", "number": "SSIS-158"},
+        {"id": "mk01", "number": "ssis-157"},
+    ]}})
+    http = FakeGet({
+        "/api/v1/javdb/search": search,
+        "/api/v1/javdb/movies/mk01": _movie_payload(),
+    })
+    names, movie_id = avdb.movie_actress("http://avdb", detail_url=None,
+                                        number="SSIS-157", http=http)
+    assert (names, movie_id) == ("三上悠亜", "mk01")
+    assert http.calls[0][1]["q"] == "SSIS-157"
+
+
+def test_movie_actress_never_matches_near_miss_number():
+    """搜到的是邻近编号（DPMU-020 vs DPMI-020）时必须放弃，不能张冠李戴。"""
+    search = Resp(200, {"code": 0, "data": {"movies": [
+        {"id": "m9", "number": "DPMU-020"},
+    ]}})
+    http = FakeGet({"/api/v1/javdb/search": search})
+    assert avdb.movie_actress("http://avdb", detail_url=None,
+                              number="DPMI-020", http=http) == (None, None)
+    assert len(http.calls) == 1               # 没再去取详情
+
+
+def test_movie_actress_rejects_movie_with_other_number():
+    """detail_url 指向的电影编号对不上 → 不显示演员（宁可没有）。"""
+    http = FakeGet({"/api/v1/javdb/movies/mk01": _movie_payload(number="OTHER-001")})
+    assert avdb.movie_actress("http://avdb", detail_url="https://javdb.com/v/mk01",
+                              number="SSIS-157", http=http) == (None, "mk01")
+
+
+def test_movie_actress_none_when_movie_has_no_actors():
+    http = FakeGet({"/api/v1/javdb/movies/mk01": _movie_payload(actors=[])})
+    assert avdb.movie_actress("http://avdb", detail_url="https://javdb.com/v/mk01",
+                              number="SSIS-157", http=http) == (None, "mk01")
+
+
+def test_movie_actress_joins_multiple_names():
+    payload = _movie_payload(actors=[
+        {"name": "葵つかさ", "gender": 0},
+        {"name": "桜空もも", "gender": 0},
+    ])
+    http = FakeGet({"/api/v1/javdb/movies/mk01": payload})
+    names, _ = avdb.movie_actress("http://avdb", detail_url="https://javdb.com/v/mk01",
+                                  number="SSIS-157", http=http)
+    assert names == "葵つかさ、桜空もも"
+
+
+def test_movie_actress_raises_on_upstream_502():
+    """502 必须冒泡（调用方要区分「查不到」和「这次没问到」）。"""
+    http = FakeGet({"/api/v1/javdb/movies/mk01": Resp(502, None, text="bad gateway")})
+    with pytest.raises(AvdbError, match="HTTP 502"):
+        avdb.movie_actress("http://avdb", detail_url="https://javdb.com/v/mk01",
+                           number="SSIS-157", http=http)
+
+
+def test_movie_actress_raises_auth_error_on_401():
+    http = FakeGet({"/api/v1/javdb/movies/mk01": Resp(401, None, text="no auth")})
+    with pytest.raises(AvdbAuthError):
+        avdb.movie_actress("http://avdb", detail_url="https://javdb.com/v/mk01",
+                           number="SSIS-157", http=http)
+
+
+def test_avdb_get_bypasses_env_proxy(monkeypatch):
+    seen = {}
+
+    def fake_get(url, **kwargs):
+        seen["url"] = url
+        seen.update(kwargs)
+        return _movie_payload()
+
+    monkeypatch.setattr(avdb.httpx, "get", fake_get)
+    names, _ = avdb.movie_actress("http://avdb", detail_url="https://javdb.com/v/mk01",
+                                  number="SSIS-157")
+    assert names == "三上悠亜"
+    assert seen["trust_env"] is False
+
+
+def test_movie_actress_sends_bearer_token():
+    """``/api/v1/javdb/*`` 实测**要** JWT（OpenAPI 里写的 security: None 是假的）。"""
+    http = FakeGet({"/api/v1/javdb/movies/mk01": _movie_payload()})
+    avdb.movie_actress("http://avdb", detail_url="https://javdb.com/v/mk01",
+                       number="SSIS-157", token="JWT1", http=http)
+    assert http.headers[0]["Authorization"] == "Bearer JWT1"
+
+
+# ---------------------------------------------------------------- LtxSource.token
+
+
+def _creds(db, box):
+    sr = SettingsRepo(db, box)
+    sr.put(config.section_key("ltx", "base_url"), "http://avdb")
+    sr.put(config.section_key("ltx", "username"), "u")
+    sr.put(config.section_key("ltx", "password"), "p")
+    return sr
+
+
+def test_source_token_returns_cached_jwt(db, box):
+    sr = _creds(db, box)
+    sr.put(avdb.JWT_KEY, "CACHED")
+    http = FakeHTTP()
+    assert LtxSource(sr, http=http).token() == "CACHED"
+    assert http.calls == []          # 有缓存就不登录
+
+
+def test_source_token_logs_in_and_stores(db, box):
+    sr = _creds(db, box)
+    assert LtxSource(sr, http=FakeHTTP()).token() == "JWT1"
+    assert sr.get(avdb.JWT_KEY) == "JWT1"
+
+
+def test_source_token_force_relogins(db, box):
+    sr = _creds(db, box)
+    sr.put(avdb.JWT_KEY, "OLD")
+    http = FakeHTTP()
+    assert LtxSource(sr, http=http).token(force=True) == "JWT1"
+    assert sr.get(avdb.JWT_KEY) == "JWT1"
+    assert len(http.calls) == 1      # 只这一次登录
+
+
+def test_source_token_without_credentials_raises(db, box):
+    with pytest.raises(AvdbNotConfigured):
+        LtxSource(SettingsRepo(db, box)).token()

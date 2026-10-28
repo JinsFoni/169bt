@@ -1137,14 +1137,40 @@ AvdbClient（HTTP 层）    POST /api/v1/users/login（表单编码）→ access
 | JWT **没有 `exp`** | 无法预判过期 → 只在收到 401 时重登一次再重试（且只重试一次，避免把登录玩成暴力破解）。令牌加密存 `ltx.jwt` |
 | 图床直连返回**加密字节** | `tp.spfcas.com` 对直连返回 159 500 B `binary/octet-stream`（无 JPEG magic，PIL 报 "cannot identify image file"）。同一 URL 经 `/api/v1/img-proxy/?url=…` 拿回才是正常 JPEG。见 ADR-23 |
 | `preview_images` 有**三种形状** | 单 URL / **逗号分隔的一串** / 数组。必须按逗号切（AVdb 前端也是 `split(",")`），否则整串当 URL 去请求 → 405 / 破图 |
-| 一次全量 = 7 页 / 658 条 / **约 3.6 秒** | 同步是「秒级」，可以直接同步执行，不需要像采集那样上后台线程 |
+| 一次全量 = 15 页 / **1450 条** / 约 4 秒（2026-10-28；上线时只有 658 条） | 同步是「秒级」，可以直接同步执行，不需要像采集那样上后台线程。★ 但**一条数一直在涨**：翻页上限 `AVDB_MAX_PAGES` 若按当时的 658 条定成 20，涨到 2000 条就会静默截断，故设为 100 |
 
 **为什么落本地镜像而不是每次实时查**（ADR-22）：日期分组与计数、`tg_sent_at`
 （已下载标记）、AVdb 掉线时的可浏览性——三件事都要求本地有行。
 
-**封面按需本地化**：列表接口**不**逐张下载图片（658 条全预下载是几百 MB，
+**封面按需本地化**：列表接口**不**逐张下载图片（千条级全预下载是几百 MB，
 而用户只看其中一部分），卡片 `<img>` 走 `/api/ltx/cover/{id}`，首次请求时
 下载 + 转码 600/1200 两档 WebP 落盘，之后直接发文件并带 `immutable` 缓存。
+
+**演员按需查询**（`movie_actress` + `GET /api/ltx/{id}/actress`）：番号
+`number` 在资源对象里，**演员不在** —— `/articles/search` 只吐
+`number/title/magnet/preview_images/detail_url/…`，`actors` 只出现在 AVdb
+自己的导入载荷 schema 里。演员要顺 `detail_url`（`https://javdb.com/v/822NKW`，
+末尾就是 javdb movie id）去问它的 javdb 模块：
+
+```
+详情页 URL ──/v/(…)──▶ movie_id ──GET /api/v1/javdb/movies/{id}──▶ actors[]
+                        │                                    （gender 0=女 1=男）
+                        └─ 没 id（镜像里约 20%）→ GET /api/v1/javdb/search?q=编号
+                                                 只认**编号完全一致**的一条
+```
+
+三条实测约束决定了它是「灯箱懒加载」而不是「同步时全量补」（ADR-26）：
+
+| 约束 | 实测 |
+|---|---|
+| **不能并发** | 6 路并行 → 40/40 全 **502**（走用户自己的 javdb 账号）；串行 +0.5 s → 全成功 |
+| **未缓存很慢** | 0.6 s / 1.8 s / 2.6 s / **14.4 s**（长尾）；1164 条全量回填 ≈ 30–60 分钟 |
+| **AVdb 自己有缓存** | 同 id 第二次 **10–15 ms** → 回填是一次性成本，但首次太贵 |
+
+所以：只查用户真正点开的那一条 → 进程内缓存（键带 `detail_url`+`number`，
+重新同步后自动失效）→ 上游串行闸门（2 s 抢不到就回 `busy`，前端当作没有
+演员，绝不排队）。**编号校验**：取回的电影编号与本地不一致就放弃——宁可
+没有，也不能把别人的女优挂到这条资源上（搜「DPMI-020」会混进「DPMU-020」）。
 
 ---
 
@@ -1277,6 +1303,7 @@ APScheduler (15min) 或 POST /api/emby/refresh
 | GET | `/api/ltx/dates` | — | `[{date, count}]` 升序（形状同 `/api/dates`） | S-10 |
 | GET | `/api/ltx/posts` | `?date=` | `[PostDTO]`（**字段名与 `/api/posts` 完全一致**） | S-10 |
 | GET | `/api/ltx/cover/{id}` | `?w=600\|1200` | WebP 字节（首次请求触发下载+转码，`immutable`） | S-10 |
+| GET | `/api/ltx/{id}/actress` | — | `{ok, actress, movie_id, cached}`；查不到 `actress: null`；上游忙 `busy: true`；`502` 上游 | S-10 |
 | POST | `/api/ltx/{id}/forward` | — | `{ok, message_id}`；`409` 已转发 | S-10 T-7 |
 | POST | `/api/ltx/forward` | `?date=` | `{sent, skipped, failed, errors}` | S-10 T-2 |
 
@@ -1438,6 +1465,7 @@ log.error("emby.sync.failed", exc_info=True)     # 但不影响浏览
 | ADR-23 | **LTX 封面经 AVdb 的 `img-proxy` 取，不直连图床** | 图床对直连返回加密字节（热链保护）；顺带把出网交给 AVdb | 直连图床：拿不到图（PIL 无法识别），且本机得为图床配代理 |
 | ADR-24 | **媒体库多选存逗号串（`emby.library`），不新增键、不迁移** | 单选时代的裸 id 与多选的 `"a,b"` 被同一个 `parse_library_ids` 吃掉；省掉迁移与「两个键谁优先」的判定 | 新增 `emby.libraries`：要迁移，还得定义并存时的优先级，收益为零 |
 | ADR-25 | **多库**逐库**拉取再合并，不传多值 `ParentId`** | `/Items` 的 `ParentId` 是单值参数，传多值不报错、只静默命中一个库（「明明在库里却没角标」） | 逗号拼一条 / 重复同名参数 / `AncestorIds`：前两者静默错，后者无文档保证 |
+| ADR-26 | **LTX 演员走「灯箱懒加载 + 进程内缓存」，不在同步时全量补** | javdb 详情未缓存 0.6–14 s 且**并发即 502**（6 路 → 40/40 失败），1164 条回填要 30–60 分钟；用户只会看其中一小部分 | 同步时补全：同步从 3.6 秒变成半小时，且一并发就把用户的 javdb 账号打到限流 |
 
 ---
 
@@ -1455,7 +1483,7 @@ log.error("emby.sync.failed", exc_info=True)     # 但不影响浏览
    图片本地化、一条 `pending→done` 状态机。AVdb 的行只是别人的列表项，
    塞进去会让 `status`/`retry_count`/`next_retry_at` 这些列全部说谎。
 2. **写入模式不同**：`posts` 是增量插入（新帖一条条来）；LTX 是整表覆盖式
-   同步（658 条一次到齐 + 上游删除要跟着删）。upsert + prune 放在 `posts`
+   同步（上千条一次到齐 + 上游删除要跟着删）。upsert + prune 放在 `posts`
    上会误伤真实归档。
 3. **失败隔离**：AVdb 挂了只影响「同步」这一个动作，镜像照常可翻；
    两者混表后一次同步失败就可能拖累归档查询。

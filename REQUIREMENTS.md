@@ -252,6 +252,8 @@ GET https://169bt.com/forum.php?mod=forumdisplay&fid=192&orderby=dateline&page=N
 | L-8 | 与论坛态解耦 | LTX 页隐藏「采集」按钮与论坛会话 chip；TG 未配置时同样禁用转发并提示 |
 | L-9 | 设置项 | AVdb 地址 / 账号 / 密码 / API Key（可选）+ 上次同步时间与本地条数提示 |
 | L-10 | 配置校验 | 地址必须是完整 `http(s)://`，尾部斜杠归一 |
+| L-11 | 番号 | 直接用上游 `number` 字段（本地镜像 1450/1450 全有），即卡片上的番号、也是 Emby 角标匹配的 `code` |
+| L-12 | 演员（按需） | 上游资源对象**没有**演员字段；**打开灯箱时**顺 `detail_url` 查 AVdb 的 javdb 模块取女优（`gender==0`），进程内缓存、上游串行；查不到就**不显示**，不弹错误；卡片上不预先显示（一页 20 条会把 javdb 打到 502） |
 
 ---
 
@@ -478,6 +480,11 @@ ed2k      : ed2k://|file|s169bbs.com@START-624_[4K].mkv|7515146184|0B17E95CBBA18
 | 图床代理 | `GET /api/v1/img-proxy/?url=<urlencoded>&mode=cover&w=&q=&fmt=webp&cover_all=0` → 正常 JPEG/WebP，**无需鉴权**。AVdb 前端（`src-lib-image-cache`）就是这么包所有远端图片的 |
 | `preview_images` 形状 | 三种：单 URL / **逗号分隔的多 URL** / 数组。必须按逗号切分（前端也是 `split(",")`） |
 | 代理 | AVdb 在**局域网**，客户端必须 `trust_env=False`，否则会被应用/环境里的外网代理劫持 |
+| 演员字段 | 条目里**没有** `actors`（只有 `tid/number/title/magnet/size_bytes/preview_images/detail_url/section/tags/resource_tags/in_stock/rejected/create_time/update_time/emby_*/website/category/img_list/image_count/has_local_subtitle`）。`actors` 只出现在导入载荷 `RawManualDownloadPayload` 里 |
+| javdb 详情 | `GET /api/v1/javdb/movies/{movie_id}` —— **无需鉴权**（AVdb 用它自己的 javdb 账号 `avdbym` 代理），返回 `movie.actors[{id,name,gender,avatar_url}]`（`gender` 0=女 1=男）+ `release_date/maker_name/tags/series_name/score` |
+| javdb movie id | 就在 `detail_url` 里：`https://javdb.com/v/822NKW`（镜像域名 `javdb580.com` 路径相同）。本地镜像 1450 条中 **1164 条（80%）** 有；其余按编号搜 |
+| javdb 按编号搜 | `GET /api/v1/javdb/search?q=<番号>&limit=n` → `data.movies[]`（含 `id/number/title/release_date`），**必须校验编号完全一致**（搜 `DPMI-020` 会混进 `DPMU-020`） |
+| javdb 速率 | 未缓存一次 **0.6–14 s**（长尾在 javdb 侧）；AVdb 有缓存，同 id 第二次 **10–15 ms**。**并发即 502**：6 路并行 → 40/40 失败；串行 +0.5 s 间隔 → 全成功 |
 
 ## 附录 B：UI 实现现状（`ui/`）
 

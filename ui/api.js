@@ -151,6 +151,11 @@
     },
     // ★ 全量 7 页 ≈ 3 秒，但 AVdb 慢起来可能十几秒；默认 10 秒太紧。
     syncLtx: function () { return request('POST', '/api/ltx/sync', undefined, 60000); },
+    // 演员：**按需**查（灯箱打开时）。实测未缓存 0.6–14 秒（长尾在 javdb），
+    // 所以给 20 秒——默认 10 秒会把这个慢查询直接掐断，用户只是看不到演员。
+    getLtxActress: function (id) {
+      return request('GET', '/api/ltx/' + id + '/actress', undefined, 20000);
+    },
     forwardLtx: function (id) {
       return request('POST', '/api/ltx/' + id + '/forward');
     },

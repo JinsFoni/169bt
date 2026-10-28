@@ -1,6 +1,6 @@
 """LTX 数据源接口（第二个 ed2k 来源：AVdb 的「LTX破解」板块）。
 
-四条只读接口 + 两条写接口：
+五条只读接口 + 两条写接口：
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
@@ -9,6 +9,7 @@
 | GET  | ``/api/ltx/dates`` | 有资源的日期与条数（对齐 ``/api/dates``） |
 | GET  | ``/api/ltx/posts`` | 某日资源（对齐 ``/api/posts``） |
 | GET  | ``/api/ltx/cover/{id}`` | 封面图（按需下载+本地化，浏览器并行取） |
+| GET  | ``/api/ltx/{id}/actress`` | 演员（灯箱按需查 javdb，进程内缓存） |
 | POST | ``/api/ltx/{id}/forward`` | 单条转发 ed2k 到 Telegram |
 | POST | ``/api/ltx/forward?date=`` | 批量转发当日全部 ed2k |
 
@@ -34,11 +35,13 @@ from bt169.api.deps import get_ltx, get_settings
 from bt169.api.routes.telegram import BatchResult, ForwardResult, _fail
 from bt169.avdb import (
     AvdbAuthError,
+    AvdbCreds,
     AvdbError,
     AvdbNotConfigured,
     LtxSource,
     image_fetch,
     load_creds,
+    movie_actress,
 )
 from bt169.collector.imagecache import (
     CARD_WIDTH,
@@ -46,7 +49,7 @@ from bt169.collector.imagecache import (
     ImageCache,
     ImageError,
 )
-from bt169.models import LtxPostDTO
+from bt169.models import LtxItem, LtxPostDTO
 from bt169.mtpproto import MtpNotConfigured, get_sender
 from bt169.repo.ltx import LtxRepo
 from bt169.repo.posts import now_iso
@@ -67,6 +70,19 @@ _sync_lock = threading.Lock()
 
 #: 允许的封面档位（与前端灯箱/卡片一致）。
 _COVER_WIDTHS = (CARD_WIDTH, LIGHTBOX_WIDTH)
+
+#: 演员查询的**上游串行闸门**。实测 6 路并发打 javdb 详情 → 40/40 全 502
+#: （走的是用户自己的 javdb 账号，有额度），串行 +0.5 秒间隔则全成功。
+_actress_lock = threading.Lock()
+
+#: 抢不到闸门时最多等多久（秒）。灯箱一次只开一个，2 秒够正常使用；
+#: 连点开一堆时不排队，直接回 ``busy``，避免请求雪崩。
+_ACTRESS_WAIT = 2.0
+
+#: ``item_id → (detail_url, number, actress)``。只缓存**已问过**的结果
+#: （含「查不到」），上游失败不写缓存。进程内、重启即失效，够用了。
+_actress_cache: dict[int, tuple[str | None, str | None, str | None]] = {}
+_ACTRESS_CACHE_MAX = 500
 
 
 def get_source(request: Request) -> LtxSource:
@@ -201,7 +217,7 @@ def cover(
          应用内代理设置可用；
       2. 直连会把「AVdb 的图床」变成浏览前提，图床抖动时整页空白。
     与 4K 帖子的图片本地化（W-15）是同一个理由，只是这里**按需**做
-    （658 条全部预下载要几百 MB，而用户只会看其中一部分）。
+    （上千条全部预下载要几百 MB，而用户只会看其中一部分）。
 
     ★ 用 ``FileResponse`` 而非 302 跳转：URL 里已经有稳定 id，
       直接回字节可以让浏览器按 immutable 缓存，少一次往返。
@@ -261,6 +277,90 @@ def cover(
         path,
         headers={"cache-control": "public, max-age=31536000, immutable"},
     )
+
+
+def _lookup_actress(
+    source: LtxSource, creds: AvdbCreds, item: LtxItem
+) -> tuple[str | None, str | None]:
+    """查演员，401 时用凭据重登**一次**再试（与 ``fetch_all`` 同策略）。
+
+    ★ ``/api/v1/javdb/*`` 在 OpenAPI 里写 ``security: None``，实测不带 JWT
+      就是 401（AVdb 有全局鉴权中间件）。所以这条路径也必须有令牌。
+    """
+    token = source.token()
+    try:
+        return movie_actress(
+            creds.base_url,
+            detail_url=item.detail_url,
+            number=item.number,
+            token=token,
+        )
+    except AvdbAuthError:
+        log.info("LTX 演员：JWT 失效，重新登录后重试")
+        token = source.token(force=True)
+        return movie_actress(
+            creds.base_url,
+            detail_url=item.detail_url,
+            number=item.number,
+            token=token,
+        )
+
+
+@router.get("/{item_id}/actress")
+def actress(
+    item_id: int,
+    request: Request,
+    ltx: LtxRepo = Depends(get_ltx),
+    source: LtxSource = Depends(get_source),
+) -> dict[str, Any]:
+    """这条资源的演员（灯箱打开时才查，**不落库**）。
+
+    为什么是「按需」而不是同步时补全，见 ``avdb.movie_actress`` 的实测记录
+    （未缓存 0.6–14 秒、并发即 502）。这里只额外做两件事：
+
+    1. **进程内缓存**：同一条二次打开 / 刷新页面不再问上游（AVdb 自己的
+       缓存 10–15 ms，我们连这一跳也省掉）；
+    2. **上游串行闸门**：实测 6 路并发 → 40/40 全 502。灯箱一次只开一个，
+       串行化的代价就是「连点开好几个时，后面的等前面」；等不到（2 秒）
+       就回 ``busy``，前端当作「没有演员」静默处理，绝不排队堆请求。
+
+    查不到不是错误：``actress: null``。上游真失败才 502（与其它 LTX 接口
+    同一个错误口径，前端也是同一个处理）。
+    """
+    item = ltx.get(item_id)
+    if item is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "not_found", "message": f"LTX 资源不存在：{item_id}"},
+        )
+
+    cached = _actress_cache.get(item_id)
+    # ★ 缓存键带上 ``detail_url``/``number``：重新同步后编号或指向变了，
+    #   旧结果就不能再用（否则会一直显示上一版的女优）。
+    if cached is not None and cached[:2] == (item.detail_url, item.number):
+        return {"ok": True, "actress": cached[2], "cached": True}
+
+    creds = load_creds(SettingsRepo(request.app.state.db, request.app.state.box))
+    if not _actress_lock.acquire(timeout=_ACTRESS_WAIT):
+        log.info("LTX 演员：上游正忙，跳过 %s（%s）", item_id, item.number)
+        return {"ok": True, "actress": None, "busy": True}
+
+    try:
+        names, movie_id = _lookup_actress(source, creds, item)
+    except AvdbError as exc:
+        log.info("LTX 演员查询失败（%s %s）：%s", item_id, item.number, exc)
+        raise _upstream(exc) from exc
+    finally:
+        _actress_lock.release()
+
+    if len(_actress_cache) >= _ACTRESS_CACHE_MAX:
+        _actress_cache.clear()          # 无上限字典会被长跑进程撑爆
+    _actress_cache[item_id] = (item.detail_url, item.number, names)
+
+    log.info(
+        "LTX 演员：%s（%s）→ %s", item.number, movie_id, names or "（未收录）"
+    )
+    return {"ok": True, "actress": names, "movie_id": movie_id, "cached": False}
 
 
 # ---------------------------------------------------------------- 转发

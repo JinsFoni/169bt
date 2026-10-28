@@ -5,13 +5,15 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
 from bt169 import config
 from bt169.api.app import create_app
 from bt169.api.routes import ltx as ltx_routes
-from bt169.avdb import AvdbAuthError, AvdbError, AvdbNotConfigured
+from bt169.avdb import AvdbAuthError, AvdbError, AvdbNotConfigured, LtxSource
 from bt169.collector.imagecache import CARD_WIDTH, LIGHTBOX_WIDTH
 from bt169.repo.ltx import LtxRepo
 from bt169.repo.posts import now_iso
@@ -341,3 +343,199 @@ def test_ltx_paths_are_gated(db, box):
     application = create_app(db, box=box, ui_dir=None, image_dir=None)
     with TestClient(application) as c:
         assert c.get("/api/ltx/dates").status_code == 401
+
+
+# ---------------------------------------------------------------- 演员（按需查询）
+#
+# LTX 资源对象里没有演员字段，灯箱打开时才向 AVdb 的 javdb 模块问一次。
+# 这里钉住：命中/查不到/上游失败三种口径、进程内缓存、以及「上游忙」的降级。
+
+
+@pytest.fixture(autouse=True)
+def _clear_actress_cache():
+    """演员缓存是**进程级**的，测试之间必须清干净（否则互相串味）。"""
+    ltx_routes._actress_cache.clear()
+    yield
+    ltx_routes._actress_cache.clear()
+
+
+class _Resp:
+    def __init__(self, status, payload):
+        self.status_code = status
+        self.text = json.dumps(payload)
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+class FakeLoginHTTP:
+    """假 ``AvdbClient`` 传输层：只实现登录（``force`` 重登记账用）。"""
+
+    def __init__(self, token="JWT1"):
+        self.token = token
+        self.logins = 0
+
+    def post(self, url, *, json=None, data=None, headers=None, timeout=None):
+        self.logins += 1
+        return _Resp(200, {"code": 0, "data": {"access_token": self.token}})
+
+    def close(self):
+        pass
+
+
+def seed_ltx_creds(db, box, *, jwt="JWT1"):
+    """配好 AVdb 地址/账号 + 已缓存的 JWT（``source.token()`` 直接命中缓存）。"""
+    from bt169.avdb import JWT_KEY
+    from bt169.repo.settings import SettingsRepo
+
+    sr = SettingsRepo(db, box)
+    sr.put(config.section_key("ltx", "base_url"), "http://avdb")
+    sr.put(config.section_key("ltx", "username"), "u")
+    sr.put(config.section_key("ltx", "password"), "p")
+    if jwt:
+        sr.put(JWT_KEY, jwt)
+
+
+def stub_actress(monkeypatch, *, result=("三上悠亜", "mk01"), exc=None):
+    """替换上游查询，返回调用记录（用来断言缓存是否生效）。"""
+    calls = []
+
+    def fake(base_url, *, detail_url=None, number=None, token=None):
+        calls.append((base_url, detail_url, number, token))
+        if exc is not None:
+            raise exc
+        return result
+
+    monkeypatch.setattr(ltx_routes, "movie_actress", fake)
+    return calls
+
+
+def test_actress_returns_name(app, db, box, monkeypatch):
+    seed(db)
+    seed_ltx_creds(db, box)
+    calls = stub_actress(monkeypatch)
+    r = app.get("/api/ltx/1/actress")
+    assert r.status_code == 200
+    assert r.json() == {
+        "ok": True, "actress": "三上悠亜", "movie_id": "mk01", "cached": False,
+    }
+    assert len(calls) == 1
+    # 传下去的是本地镜像里的 detail_url、编号，以及上游要求的 JWT
+    assert calls[0][1] == "https://javdb.com/v/x"
+    assert calls[0][2] == "SSIS-157"
+    assert calls[0][3] == "JWT1"
+
+
+def test_actress_second_open_uses_cache(app, db, box, monkeypatch):
+    seed(db)
+    seed_ltx_creds(db, box)
+    calls = stub_actress(monkeypatch)
+    app.get("/api/ltx/1/actress")
+    body = app.get("/api/ltx/1/actress").json()
+    assert body["actress"] == "三上悠亜"
+    assert body["cached"] is True
+    assert len(calls) == 1          # 第二次没再问上游
+
+
+def test_actress_cache_drops_when_number_changes(app, db, box, monkeypatch):
+    """重新同步后编号/指向变了，旧结果不能再用。"""
+    seed(db)
+    seed_ltx_creds(db, box)
+    calls = stub_actress(monkeypatch)
+    app.get("/api/ltx/1/actress")
+    LtxRepo(db).upsert_many([row(1, number="NEW-001")], now_iso())
+    app.get("/api/ltx/1/actress")
+    assert len(calls) == 2
+
+
+def test_actress_not_found_is_200_with_null(app, db, box, monkeypatch):
+    """查不到不是错误：前端据此静默不显示。"""
+    seed(db)
+    seed_ltx_creds(db, box)
+    stub_actress(monkeypatch, result=(None, None))
+    r = app.get("/api/ltx/1/actress")
+    assert r.status_code == 200
+    assert r.json()["actress"] is None
+
+
+def test_actress_unknown_item_404(app):
+    r = app.get("/api/ltx/999/actress")
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "not_found"
+
+
+def test_actress_upstream_error_is_502(app, db, box, monkeypatch):
+    seed(db)
+    seed_ltx_creds(db, box)
+    stub_actress(monkeypatch, exc=AvdbError("AVdb 返回 HTTP 502：bad gateway"))
+    r = app.get("/api/ltx/1/actress")
+    assert r.status_code == 502
+    assert r.json()["error"]["code"] == "ltx_upstream"
+
+
+def test_actress_not_configured_is_400(app, db, monkeypatch):
+    """没填 AVdb 账号 → ``source.token()`` 直接拒绝，压根不打上游。"""
+    seed(db)
+    calls = stub_actress(monkeypatch)
+    r = app.get("/api/ltx/1/actress")
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "ltx_not_configured"
+    assert calls == []
+
+
+def test_actress_relogins_once_when_jwt_rejected(app, db, box, monkeypatch):
+    """JWT 被作废 → 用凭据重登一次再试（与同步同一个自救策略）。"""
+    from bt169.avdb import JWT_KEY
+    from bt169.repo.settings import SettingsRepo
+
+    seed(db)
+    seed_ltx_creds(db, box, jwt="OLD")
+    calls = []
+
+    def fake(base_url, *, detail_url=None, number=None, token=None):
+        calls.append(token)
+        if token == "OLD":
+            raise AvdbAuthError("AVdb 鉴权失败")
+        return ("三上悠亜", "mk01")
+
+    monkeypatch.setattr(ltx_routes, "movie_actress", fake)
+
+    # force 登录走假 HTTP：返回新令牌
+    source = LtxSource(SettingsRepo(db, box), http=FakeLoginHTTP("NEW"))
+    app.app.dependency_overrides[ltx_routes.get_source] = lambda: source
+    try:
+        body = app.get("/api/ltx/1/actress").json()
+    finally:
+        app.app.dependency_overrides.clear()
+
+    assert body["actress"] == "三上悠亜"
+    assert calls == ["OLD", "NEW"]
+    assert SettingsRepo(db, box).get(JWT_KEY) == "NEW"    # 新令牌已落库
+
+
+def test_actress_error_is_not_cached(app, db, box, monkeypatch):
+    """上游失败**不能**落缓存，否则这一条会永远没有演员。"""
+    seed(db)
+    seed_ltx_creds(db, box)
+    stub_actress(monkeypatch, exc=AvdbError("boom"))
+    assert app.get("/api/ltx/1/actress").status_code == 502
+    stub_actress(monkeypatch)        # 上游恢复
+    assert app.get("/api/ltx/1/actress").json()["actress"] == "三上悠亜"
+
+
+def test_actress_busy_degrades_instead_of_queueing(app, db, box, monkeypatch):
+    """闸门被占 → 立刻回 busy（不打上游、不缓存），而不是排队堆请求。"""
+    seed(db)
+    seed_ltx_creds(db, box)
+    calls = stub_actress(monkeypatch)
+    monkeypatch.setattr(ltx_routes, "_ACTRESS_WAIT", 0.01)
+    ltx_routes._actress_lock.acquire()
+    try:
+        body = app.get("/api/ltx/1/actress").json()
+    finally:
+        ltx_routes._actress_lock.release()
+
+    assert body == {"ok": True, "actress": None, "busy": True}
+    assert calls == []                       # 一次上游请求都没发
+    assert app.get("/api/ltx/1/actress").json()["actress"] == "三上悠亜"

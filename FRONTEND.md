@@ -613,6 +613,35 @@ SW 检测到新版本
 1.88×（DPR=2 时 3.8×）→ 大图模糊，故增设原图档（见 §8.5 与
 ``migrations/006_original_images.sql``）。
 
+#### 灯箱演员：4K 自带、LTX 懒加载（L-12）
+
+灯箱头部是 `<span class="lb-code">` + `<span class="lb-actress">`。两源拿数据的
+方式不同，**渲染路径只有一条**：
+
+| 来源 | `actress` 从哪来 | 时机 |
+|---|---|---|
+| 4K | 采集时解析的 DTO 字段 | 随列表到达，`openLightbox` 直接写文本 |
+| LTX | `GET /api/ltx/{id}/actress`（后端顺 `detail_url` 查 javdb） | **打开灯箱那一刻**才查 |
+
+```js
+// ui/app.js：只查用户真正点开的那一条
+if (isLtx() && !p.actress) loadActress(p);   // 先占位，回来再填
+else                      paintActress(p);   // 4K / 已查过
+```
+
+四条约束（都不是「可选优化」，实测逼出来的）：
+
+| 约束 | 做法 |
+|---|---|
+| 未缓存 0.6–14 秒 | 占位文字 `.lb-actress[data-state="loading"]::after { content:'查询演员…' }`，回来**同一个元素**换文本，不跳动 |
+| 并发即 502（上游限流） | 不随卡片列表批量取；后端另有串行闸门，只查灯箱这一条 |
+| 查不到 / 上游挂 / 忙 | **一律静默**（不弹 toast）：演员是锦上添花，用户没请求它。`busy` 还不写缓存，下次打开再问 |
+| 连点开多条，慢响应串台 | 全局 `lbToken` 序号：回来时 `token !== lbToken` 直接丢弃 |
+
+成功后面板顺手调用 `patchCardActress(p)` 把徽章补到**已渲染**的那张卡上
+（不整页 `render()`，避免网格重放入场动画），并写进 `actressCache[tid]`，
+本次会话内重开秒开。
+
 ### 8.4 空态与错误态
 
 | 状态 | 展示 |

@@ -822,6 +822,18 @@ body::before {
 .lb-code { font-size: 15px; font-weight: 500; color: var(--accent); }
 .lb-actress { font-size: 13.5px; color: var(--text-mid); }
 
+/* 演员懒加载占位（LTX）：上游未缓存时要 0.6–14 秒，留白会被读成「没有演员」。
+   用同一个元素做淡字占位，回来直接换文本，宽度变化只影响这一行。 */
+.lb-actress[data-state="loading"]::after {
+  content: '查询演员…';
+  color: var(--text-dim);
+  animation: lbBreath 1.4s ease-in-out infinite;
+}
+@keyframes lbBreath { 50% { opacity: .4; } }
+@media (prefers-reduced-motion: reduce) {
+  .lb-actress[data-state="loading"]::after { animation: none; opacity: .6; }
+}
+
 .lightbox-close {
   position: absolute;
   top: 11px; right: 12px;

@@ -72,6 +72,13 @@
   /* 量词：论坛有「帖」的概念，AVdb 是把资源条目，用「条」更准确 */
   function unit() { return isLtx() ? '条' : '帖'; }
 
+  /* 演员图标：卡片徽章（渲染时）与灯箱懒加载补丁（patchCardActress）共用，
+     抄两份迟早走形。 */
+  var ACTRESS_ICON =
+    '<svg viewBox="0 0 20 20" aria-hidden="true">' +
+    '<circle cx="10" cy="6.5" r="3.25"/>' +
+    '<path d="M4 16.5c.8-3 3.2-4.5 6-4.5s5.2 1.5 6 4.5"/></svg>';
+
   /* 月历选择器状态：当前展示的「2000-01」，非自然今天，以数据为界 */
   var pickYM = null;          // null = 面板关闭
 
@@ -534,7 +541,7 @@
       '</button>';
 
     var actressHTML = p.actress
-      ? '<span class="info-actress"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="6.5" r="3.25"/><path d="M4 16.5c.8-3 3.2-4.5 6-4.5s5.2 1.5 6 4.5"/></svg>' + esc(p.actress) + '</span>'
+      ? '<span class="info-actress">' + ACTRESS_ICON + esc(p.actress) + '</span>'
       : '';
 
     return '' +
@@ -896,10 +903,77 @@
 
   /* ---------- 大图 ---------- */
 
+  /* 演员：**懒加载**（只有 LTX 需要——4K 帖子的演员是采集时解析出来的，
+     直接躺在 DTO 里）。
+
+     ★ 为什么不随列表一起取：javdb 侧未缓存一次 0.6–14 秒，而且**不能并发**
+       （实测 6 路 → 40/40 全 502）。一页 20 张卡一起取会把上游打爆，也让
+       首屏慢十几秒。只查用户真正点开的那一条。
+
+     ★ 为什么用户看不到「失败」：演员是锦上添花，查不到就什么都不显示。
+       弹 toast 只会打扰——用户根本没请求它。 */
+  var actressCache = {};      // tid → 演员串（本次会话内，重开秒开）
+  var lbToken = 0;            // 灯箱打开序号：慢响应回来时别覆盖新条目
+
+  function paintActress(p) {
+    var name = p.actress || '';
+    lbActress.textContent = name;
+    lbActress.removeAttribute('data-state');
+    lbActress.title = name ? '演员' : '';
+  }
+
+  function loadActress(p) {
+    var token = ++lbToken;
+    if (actressCache[p.tid] !== undefined) {   // 已经问过（含「没有」）
+      p.actress = actressCache[p.tid] || null;
+      paintActress(p);
+      return;
+    }
+    lbActress.textContent = '';
+    lbActress.setAttribute('data-state', 'loading');
+
+    api.getLtxActress(p.tid).then(function (r) {
+      // ★ busy：上游正忙（后端 2 秒内没抢到闸门）。不缓存——下次打开再问，
+      //   否则一次「忙」会让这条永久没有演员。
+      if (r && r.busy) {
+        if (token === lbToken) lbActress.removeAttribute('data-state');
+        return;
+      }
+      var name = (r && r.actress) || '';
+      actressCache[p.tid] = name;
+      p.actress = name || null;
+      if (token !== lbToken) return;           // 用户已经翻到别的条目
+      paintActress(p);
+      patchCardActress(p);                     // 卡片上也补上（同一次请求的成果）
+    }).catch(function () {
+      // 静默：上游挂了 / 没配置，都不是浏览时要回答的问题
+      if (token === lbToken) lbActress.removeAttribute('data-state');
+    });
+  }
+
+  /** 把刚查到的演员补到**已渲染**的那张卡上（不整页重排）。 */
+  function patchCardActress(p) {
+    if (!p.actress) return;
+    var head = document.querySelector(
+      '.card[data-tid="' + p.tid + '"] .info-head');
+    if (!head || head.querySelector('.info-actress')) return;
+    var span = document.createElement('span');
+    span.className = 'info-actress';
+    span.innerHTML = ACTRESS_ICON;
+    span.appendChild(document.createTextNode(p.actress));
+    head.appendChild(span);
+  }
+
   function openLightbox(p) {
     lastFocused = document.activeElement;
     lbCode.textContent = p.code;
-    lbActress.textContent = p.actress;
+
+    if (isLtx() && !p.actress) {
+      loadActress(p);          // 未命中缓存时先占位，回来再填
+    } else {
+      lbToken++;               // 作废在途响应
+      paintActress(p);
+    }
 
     var figs = [];
     // ★ 灯箱用**原图**（``cover_orig``/``detail_orig``，源图原样字节）。
