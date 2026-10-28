@@ -636,10 +636,18 @@ body::before {
   font-size: 11.5px;
   color: var(--text-dim);
   overflow: hidden;
+  min-width: 0;              /* 允许被压缩：番号（flex-shrink:0）优先保住 */
+  font-variant-numeric: tabular-nums;
+}
+
+/* ★ 名字单独一层：省略号必须落在**普通盒子**上。``text-overflow`` 对
+   inline-flex 的匿名文本项无效（只会硬切，中文切在字中间），所以名字
+   用这个 span 承载，容器只管对齐图标。 */
+.info-actress-name {
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
-  font-variant-numeric: tabular-nums;
 }
 
 .info-actress svg {

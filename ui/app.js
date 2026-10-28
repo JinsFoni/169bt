@@ -79,6 +79,21 @@
     '<circle cx="10" cy="6.5" r="3.25"/>' +
     '<path d="M4 16.5c.8-3 3.2-4.5 6-4.5s5.2 1.5 6 4.5"/></svg>';
 
+  /**
+   * 卡片头部的演员徽章：图标 + 名字。
+   *
+   * ★ 名字必须再包一层 `<span>`（`.info-actress-name`）才能出现省略号：
+   *   `.info-actress` 是 inline-flex（图标与文字基线对齐），而
+   *   ``text-overflow`` 对**弹性容器的匿名文本项无效**——直接放文本节点
+   *   只会被硬切，中文会切在字中间。LTX 一个「、」连起来串两三个名字时
+   *   就会碰到（4K 多是单人名，所以以前没暴露）。
+   * ★ 渲染时与补徽章（patchCardActress）共用本函数，别写两份。
+   */
+  function actressSpan(name) {
+    return '<span class="info-actress">' + ACTRESS_ICON +
+             '<span class="info-actress-name">' + esc(name) + '</span></span>';
+  }
+
   /* 月历选择器状态：当前展示的「2000-01」，非自然今天，以数据为界 */
   var pickYM = null;          // null = 面板关闭
 
@@ -254,6 +269,7 @@
     deleted = [];
     loading = false;
     currentReq++;
+    actressKickTried = false;        // 换来源后允许重新叫一次演员补齐
     if (skeletonTimer) { clearTimeout(skeletonTimer); skeletonTimer = null; }
     pickClose();
     render();
@@ -264,11 +280,12 @@
   }
 
   /*
-   * 打开 LTX 页时按 TTL 自动同步（后端 ``LTX_SYNC_TTL``，默认 600 秒）。
+   * 打开 LTX 页时按 TTL 自动同步（后端 ``LTX_SYNC_TTL``，默认 600 秒），
+   * 顺便把演员补齐跑起来。
    *
    * ★ 为什么自动：AVdb 每天都有新条目，用户切到 LTX 就是想看最新的。
    *   要求他先去设置页点「同步」，等于把「看到过期数据」当默认行为。
-   * ★ 为什么不是每次：一次同步 = 7 个上游请求 + 几百行写库。来回切标签
+   * ★ 为什么不是每次：一次同步 = 15 个上游请求 + 上千行写库。来回切标签
    *   会变成拿自己的账号去打上游。
    * ★ 失败只提示不清屏：本地镜像照常能翻。
    */
@@ -280,7 +297,7 @@
       var last = Date.parse(s.synced_at || '');
       // NaN（从未同步过或格式不认识）→ 视为过期，同步一次
       var stale = !s.count || isNaN(last) || (Date.now() - last > ttl);
-      if (!stale) return;
+      if (!stale) return maybeBackfillActress(s);
       return syncLtxQuiet();
     }).catch(function () { /* 状态拉不到就跳过：不打扰 */ });
   }
@@ -294,7 +311,11 @@
       if (dismiss) dismiss();
       toast('LTX 已更新：' + res.count + ' 条', 'ok', { duration: 3000 });
       // 新条目可能落在新的日期（今天）→ 重取日期列表并刷新当前日
-      return window.reloadDates();
+      return window.reloadDates().then(function () {
+        // 同步后后端会自动开始补演员（新条目的演员要逐条问 javdb）。
+        // 这里只管「等它补上」——不重排整页，只往卡片上补徽章。
+        if (res.actress_pending > 0) scheduleActressPoll();
+      });
     }).catch(function (e) {
       if (dismiss) dismiss();
       toast('LTX 同步失败：' + e.message, 'err', { duration: 5000 });
@@ -540,9 +561,7 @@
         '<svg viewBox="0 0 20 20"><path d="M4 6.5h12M8.5 6.5V5a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v1.5M6 6.5l.7 8.4a1 1 0 0 0 1 .9h4.6a1 1 0 0 0 1-.9l.7-8.4"/></svg>' +
       '</button>';
 
-    var actressHTML = p.actress
-      ? '<span class="info-actress">' + ACTRESS_ICON + esc(p.actress) + '</span>'
-      : '';
+    var actressHTML = p.actress ? actressSpan(p.actress) : '';
 
     return '' +
       '<article class="card' + (locked ? ' no-link' : '') + '" data-tid="' + p.tid + '"' +
@@ -903,17 +922,88 @@
 
   /* ---------- 大图 ---------- */
 
-  /* 演员：**懒加载**（只有 LTX 需要——4K 帖子的演员是采集时解析出来的，
-     直接躺在 DTO 里）。
+  /* ---------- 演员（L-12） ----------
 
-     ★ 为什么不随列表一起取：javdb 侧未缓存一次 0.6–14 秒，而且**不能并发**
-       （实测 6 路 → 40/40 全 502）。一页 20 张卡一起取会把上游打爆，也让
-       首屏慢十几秒。只查用户真正点开的那一条。
+     LTX 的演员**已经落库**：同步之后后端用后台线程逐条问 javdb，写进
+     ``ltx_items.actress``，所以 ``/api/ltx/posts`` 直接带着名字回来，
+     卡片渲染路径与 4K 完全一致（番号右边那个徽章）。
+
+     这里只剩两件小事：
+
+     ① **补齐进度**（maybeBackfillActress / scheduleActressPoll）：第一次
+        同步完 1450 条要串行问半小时，用户打开页面时那一天的卡可能还没轮到。
+        于是叫一声后端（幂等）然后每 20 秒重取**当前这一天**，把冒出来的
+        演员名补到已渲染的卡片上——不重排、不重放动画、不跳滚动位置。
+     ② **灯箱插队**（loadActress）：点开的那条若还在待办队列里，后端会立刻
+        查这一条并落库（1 秒内），下次打开就是库里的了。
 
      ★ 为什么用户看不到「失败」：演员是锦上添花，查不到就什么都不显示。
        弹 toast 只会打扰——用户根本没请求它。 */
   var actressCache = {};      // tid → 演员串（本次会话内，重开秒开）
   var lbToken = 0;            // 灯箱打开序号：慢响应回来时别覆盖新条目
+
+  /*: 补齐轮询：间隔与次数上限。20 秒 × 8 次 ≈ 2.5 分钟，够最近几天的
+      几十条补完；再多就是浪费请求（用户重开页面会重新排）。
+      只打本机接口（``/api/ltx/posts`` 读的是 SQLite），不碰上游。 */
+  var ACTRESS_POLL_MS = 20000;
+  var ACTRESS_POLL_MAX = 8;
+  var actressPollTimer = null;
+  var actressPollLeft = 0;
+  var actressKickTried = false;   // 一次会话只叫一次后端，别反复叫醒
+
+  function hasPendingActress() {
+    for (var i = 0; i < posts.length; i++) {
+      if (!posts[i].actress) return true;
+    }
+    return false;
+  }
+
+  /* 叫后端开始/继续补（幂等）。``s`` 是 /api/ltx/status 的响应。 */
+  function maybeBackfillActress(s) {
+    if (!isLtx() || !s || !s.configured) return Promise.resolve();
+    if (!s.actress_pending) return Promise.resolve();      // 都补齐了
+    if (s.actress_running) { scheduleActressPoll(); return Promise.resolve(); }
+    if (actressKickTried) return Promise.resolve();
+    actressKickTried = true;
+
+    return api.startLtxActressBackfill().then(function (r) {
+      if (!r || !r.actress_pending) return;
+      toast('正在补齐 ' + r.actress_pending + ' 条演员信息…',
+            'info', { duration: 4000 });
+      scheduleActressPoll();
+    }).catch(function () { /* 静默：补齐失败不该拦住浏览 */ });
+  }
+
+  function scheduleActressPoll() {
+    if (!isLtx() || actressPollTimer) return;
+    if (!activeDate || !hasPendingActress()) return;
+    actressPollLeft = ACTRESS_POLL_MAX;
+    armActressPoll();
+  }
+
+  function armActressPoll() {
+    var date = activeDate;
+    actressPollTimer = setTimeout(function () {
+      actressPollTimer = null;
+      if (!isLtx() || activeDate !== date || actressPollLeft <= 0) return;
+      actressPollLeft--;
+
+      api.getLtxPosts(date).then(function (list) {
+        if (!isLtx() || activeDate !== date) return;
+        (list || []).forEach(function (n) {
+          if (!n.actress) return;
+          for (var i = 0; i < posts.length; i++) {
+            // 只补**还没有**演员的卡：4K 的演员是采集时抓的，不许被覆盖，
+            // 也不能因为后端某次返回空就抹掉已经显示的。
+            if (posts[i].tid !== n.tid || posts[i].actress) continue;
+            posts[i].actress = n.actress;
+            patchCardActress(posts[i]);
+          }
+        });
+        if (hasPendingActress() && actressPollLeft > 0) armActressPoll();
+      }).catch(function () { /* 静默：网络抖动不该弹窗 */ });
+    }, ACTRESS_POLL_MS);
+  }
 
   function paintActress(p) {
     var name = p.actress || '';
@@ -933,8 +1023,8 @@
     lbActress.setAttribute('data-state', 'loading');
 
     api.getLtxActress(p.tid).then(function (r) {
-      // ★ busy：上游正忙（后端 2 秒内没抢到闸门）。不缓存——下次打开再问，
-      //   否则一次「忙」会让这条永久没有演员。
+      // ★ busy：上游正忙（回填线程占着闸门超过 2 秒）。不缓存——下次打开
+      //   再问，否则一次「忙」会让这条永久没有演员。
       if (r && r.busy) {
         if (token === lbToken) lbActress.removeAttribute('data-state');
         return;
@@ -960,7 +1050,10 @@
     var span = document.createElement('span');
     span.className = 'info-actress';
     span.innerHTML = ACTRESS_ICON;
-    span.appendChild(document.createTextNode(p.actress));
+    var name = document.createElement('span');
+    name.className = 'info-actress-name';
+    name.textContent = p.actress;      // textContent：名字里的「、」等原样，不解析 HTML
+    span.appendChild(name);
     head.appendChild(span);
   }
 

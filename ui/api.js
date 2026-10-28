@@ -149,10 +149,16 @@
     getLtxPosts: function (date) {
       return request('GET', '/api/ltx/posts?date=' + encodeURIComponent(date));
     },
-    // ★ 全量 7 页 ≈ 3 秒，但 AVdb 慢起来可能十几秒；默认 10 秒太紧。
+    // ★ 全量 15 页 ≈ 3 秒，但 AVdb 慢起来可能十几秒；默认 10 秒太紧。
+    // 响应里带 ``actress_pending``：同步只拉列表，演员由后台逐条补齐（L-12）。
     syncLtx: function () { return request('POST', '/api/ltx/sync', undefined, 60000); },
-    // 演员：**按需**查（灯箱打开时）。实测未缓存 0.6–14 秒（长尾在 javdb），
-    // 所以给 20 秒——默认 10 秒会把这个慢查询直接掐断，用户只是看不到演员。
+    // L-12：叫醒后台演员回填（幂等）。同步后新条目的演员要串行问上游，
+    // 1450 条要半小时，所以是个后台线程；前端只负责叫一声 + 轮询进度。
+    startLtxActressBackfill: function () {
+      return request('POST', '/api/ltx/actress/backfill');
+    },
+    // 演员：灯箱里那条**恰好还没轮到回填**时的插队查询（会落库）。
+    // 实测未缓存 0.6–14 秒（长尾在 javdb），所以给 20 秒。
     getLtxActress: function (id) {
       return request('GET', '/api/ltx/' + id + '/actress', undefined, 20000);
     },

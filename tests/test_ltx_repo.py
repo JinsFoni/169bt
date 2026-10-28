@@ -112,3 +112,71 @@ def test_mark_tg_sent_and_sent_tids(db):
 
 def test_get_missing_returns_none(db):
     assert LtxRepo(db).get(404) is None
+
+
+# ---------------------------------------------------------------- 演员（L-12）
+
+
+def test_upsert_keeps_actress(db):
+    """★ 演员是本地攒出来的，同步不能把它冲掉——否则每次同步都要重问一遍上游。"""
+    repo = LtxRepo(db)
+    repo.upsert_many([row(1)], now_iso())
+    repo.set_actress(1, "三上悠亜", "2026-10-26T10:00:00+08:00")
+
+    repo.upsert_many([row(1)], now_iso())
+
+    item = repo.get(1)
+    assert item.actress == "三上悠亜"
+    assert item.actress_at == "2026-10-26T10:00:00+08:00"
+
+
+def test_upsert_clears_actress_when_number_changes(db):
+    """编号变了就不是同一部片了，旧演员必须作废。"""
+    repo = LtxRepo(db)
+    repo.upsert_many([row(1)], now_iso())
+    repo.set_actress(1, "三上悠亜", "2026-10-26T10:00:00+08:00")
+
+    repo.upsert_many([row(1, number="SSIS-999")], now_iso())
+
+    item = repo.get(1)
+    assert item.actress is None
+    assert item.actress_at is None       # 重新排队回填
+
+
+def test_set_actress_with_none_still_marks_time(db):
+    """「确认没有演员」也要记时间——否则回填会永远重查这条。"""
+    repo = LtxRepo(db)
+    repo.upsert_many([row(1)], now_iso())
+    repo.set_actress(1, None, "2026-10-26T10:00:00+08:00")
+
+    item = repo.get(1)
+    assert item.actress is None
+    assert item.actress_at == "2026-10-26T10:00:00+08:00"
+    assert repo.pending_actress(10) == []
+    assert repo.actress_stats() == (1, 0)
+
+
+def test_pending_actress_is_newest_first_and_limited(db):
+    repo = LtxRepo(db)
+    repo.upsert_many([
+        row(1, date="2026-10-20"),
+        row(2, date="2026-10-25"),
+        row(3, date="2026-10-22"),
+    ], now_iso())
+
+    assert [i.id for i in repo.pending_actress(10)] == [2, 3, 1]
+    assert [i.id for i in repo.pending_actress(2)] == [2, 3]
+
+
+def test_pending_actress_skips_rejected_and_done(db):
+    repo = LtxRepo(db)
+    repo.upsert_many([row(1), row(2, rejected=1), row(3)], now_iso())
+    repo.set_actress(3, "三上悠亜", "2026-10-26T10:00:00+08:00")
+
+    assert [i.id for i in repo.pending_actress(10)] == [1]
+    assert repo.actress_stats() == (1, 1)
+
+
+def test_actress_stats_on_empty_table(db):
+    """空表时 ``SUM(...)`` 全是 NULL——不能因此抛，也不能算成 1 条待办。"""
+    assert LtxRepo(db).actress_stats() == (0, 0)

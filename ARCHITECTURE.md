@@ -179,6 +179,7 @@ Python 的 `ddddocr` 有 14.7k star、5 年历史，且**需求文档 §6 原本
 │   ├── migrations/*.sql
 │   ├── models.py                # 领域对象 + DTO
 │   ├── avdb.py                  # ★ LTX 数据源：AVdb 登录/检索/图床代理（§5.9）
+│   ├── actress.py               # ★ LTX 演员回填：后台串行查 javdb 并落库（L-12）
 │   ├── repo/
 │   │   ├── posts.py             # 帖子仓储
 │   │   ├── archive.py           # 归档日期 / 相邻导航
@@ -316,9 +317,14 @@ CREATE TABLE ltx_items (
   rejected     INTEGER NOT NULL DEFAULT 0,  -- AVdb 标记的「不合格资源」
   created_at   TEXT,                  -- 源站 create_time（页内排序）
   tg_sent_at   TEXT,                  -- NULL = 未转发（★ 同步不覆盖）
-  fetched_at   TEXT    NOT NULL       -- 本地写入时间
+  fetched_at   TEXT    NOT NULL,      -- 本地写入时间
+  actress      TEXT,                  -- 演员（008；★ 同步不覆盖，编号变了才清）
+  actress_at   TEXT                   -- 上次查演员的时间（NULL = 还没查）
 );
 CREATE INDEX idx_ltx_date ON ltx_items(publish_date) WHERE rejected = 0;
+-- 回填取数路径：待补的行越来越少，部分索引也跟着变小
+CREATE INDEX idx_ltx_actress_pending
+  ON ltx_items(publish_date DESC) WHERE actress_at IS NULL;
 ```
 
 > **为什么 `cookies` 用 TEXT/JSON 而不是 BLOB**：Python 侧用 `httpx.Cookies`，
@@ -1146,8 +1152,8 @@ AvdbClient（HTTP 层）    POST /api/v1/users/login（表单编码）→ access
 而用户只看其中一部分），卡片 `<img>` 走 `/api/ltx/cover/{id}`，首次请求时
 下载 + 转码 600/1200 两档 WebP 落盘，之后直接发文件并带 `immutable` 缓存。
 
-**演员按需查询**（`movie_actress` + `GET /api/ltx/{id}/actress`）：番号
-`number` 在资源对象里，**演员不在** —— `/articles/search` 只吐
+**演员：同步后后台补齐、落库**（`movie_actress` + `bt169/actress.py`，
+L-12）：番号 `number` 在资源对象里，**演员不在** —— `/articles/search` 只吐
 `number/title/magnet/preview_images/detail_url/…`，`actors` 只出现在 AVdb
 自己的导入载荷 schema 里。演员要顺 `detail_url`（`https://javdb.com/v/822NKW`，
 末尾就是 javdb movie id）去问它的 javdb 模块：
@@ -1159,17 +1165,38 @@ AvdbClient（HTTP 层）    POST /api/v1/users/login（表单编码）→ access
                                                  只认**编号完全一致**的一条
 ```
 
-三条实测约束决定了它是「灯箱懒加载」而不是「同步时全量补」（ADR-26）：
+★ `/api/v1/javdb/*` 实际**要 JWT**：OpenAPI 里写的是 `security: None`，
+但 AVdb 有全局鉴权中间件，不带令牌一律 401（2026-10-28 实测）。
 
-| 约束 | 实测 |
-|---|---|
-| **不能并发** | 6 路并行 → 40/40 全 **502**（走用户自己的 javdb 账号）；串行 +0.5 s → 全成功 |
-| **未缓存很慢** | 0.6 s / 1.8 s / 2.6 s / **14.4 s**（长尾）；1164 条全量回填 ≈ 30–60 分钟 |
-| **AVdb 自己有缓存** | 同 id 第二次 **10–15 ms** → 回填是一次性成本，但首次太贵 |
+三条实测约束决定了「不能一次全量补」，所以拆成**同步（秒级）** +
+**后台串行回填（半小时）** 两段：
 
-所以：只查用户真正点开的那一条 → 进程内缓存（键带 `detail_url`+`number`，
-重新同步后自动失效）→ 上游串行闸门（2 s 抢不到就回 `busy`，前端当作没有
-演员，绝不排队）。**编号校验**：取回的电影编号与本地不一致就放弃——宁可
+| 约束 | 实测 | 设计后果 |
+|---|---|---|
+| **不能并发** | 6 路并行 → 40/40 全 **502**（走用户自己的 javdb 账号）；串行 +0.5 s → 全成功 | 回填单线程、一条一条来，且在条间睡 0.5 s；与「灯箱插队」共用同一把闸门 `actress.GATE` |
+| **未缓存很慢** | 0.6 s / 1.8 s / 2.6 s / **14.4 s**（长尾）；1164 条全量 ≈ 30–60 分钟 | 回填放后台线程，同步请求不等它；`POST /api/ltx/sync` 只回「还剩多少条待补」 |
+| **AVdb 自己有缓存** | 同 id 第二次 **10–15 ms** | 但首次太贵 → **落库**才是真正的省：一条只要成功一次，之后永久 0 成本（`ltx_items.actress`） |
+
+落地形态（ADR-26）：
+
+- **`POST /api/ltx/sync`** 仍是「拉列表 + 写镜像」，几秒返回，成功后就
+  `start()` 回填线程；
+- **`ActressBackfiller`**（`bt169/actress.py`）取 `actress_at IS NULL` 的行，
+  按 `publish_date DESC` 逐条查——用户正在看的最近几天几十秒内就有；
+- **三态记账**（`migrations/008_ltx_actress.sql`）：查到 → `actress` +
+  `actress_at`；上游明确没有 → **只写** `actress_at`；上游报错 → **什么都不写**
+  （留待下次）。少了这层区分，要么永远重查「确认没有」的行，要么把失败
+  当成「没有」而永久留空；
+- **`GET /api/ltx/{id}/actress`** 保留为「插队」：灯箱里那条若还在待办队列
+  尾部，立刻查这一条并落库（1 秒内），前端顺手补到卡片上；
+- **`POST /api/ltx/actress/backfill`** 显式叫醒（幂等）：前端打开 LTX 页发现
+  `actress_pending > 0` 时叫一次，服务重启/上轮没跑完之后靠它续上；
+- **不自动起跑**：回填只在「同步完」和「前端叫一声」时启动，不由服务重启
+  触发（否则每次重启都白打半小时上游）；
+- 卡片与灯箱此后**都只读库**，与 4K 走同一套渲染路径。
+
+**失败方向**：连续失败 5 条（`MAX_FAILS`）本轮就收手——上游限流/账号被锁时
+继续重试只会更糟。**编号校验**：取回的电影编号与本地不一致就放弃——宁可
 没有，也不能把别人的女优挂到这条资源上（搜「DPMI-020」会混进「DPMU-020」）。
 
 ---
@@ -1298,12 +1325,13 @@ APScheduler (15min) 或 POST /api/emby/refresh
 | POST | `/api/auth/login` | `{password}` | `Set-Cookie` | S-6 |
 | POST | `/api/auth/logout` | — | `204` | S-6 |
 | GET | `/api/auth/me` | — | `{authenticated}` | S-6 |
-| GET | `/api/ltx/status` | — | `{configured, synced_at, count, ttl}` | S-10 |
-| POST | `/api/ltx/sync` | — | `{ok, fetched, pruned, count, synced_at}`；`409` 正在同步；`400` 未配置；`502` 上游 | S-10 |
+| GET | `/api/ltx/status` | — | `{configured, synced_at, count, ttl, actress_done, actress_pending, actress_running}` | S-10 L-12 |
+| POST | `/api/ltx/sync` | — | `{ok, fetched, pruned, count, synced_at, actress_pending}`（成功后自动开始回填演员）；`409` 正在同步；`400` 未配置；`502` 上游 | S-10 L-12 |
 | GET | `/api/ltx/dates` | — | `[{date, count}]` 升序（形状同 `/api/dates`） | S-10 |
-| GET | `/api/ltx/posts` | `?date=` | `[PostDTO]`（**字段名与 `/api/posts` 完全一致**） | S-10 |
+| GET | `/api/ltx/posts` | `?date=` | `[PostDTO]`（**字段名与 `/api/posts` 完全一致**；`actress` 来自已落库的回填结果） | S-10 L-12 |
 | GET | `/api/ltx/cover/{id}` | `?w=600\|1200` | WebP 字节（首次请求触发下载+转码，`immutable`） | S-10 |
-| GET | `/api/ltx/{id}/actress` | — | `{ok, actress, movie_id, cached}`；查不到 `actress: null`；上游忙 `busy: true`；`502` 上游 | S-10 |
+| GET | `/api/ltx/{id}/actress` | — | `{ok, actress, movie_id, cached}`；库里已有答案时 `cached: true`（不问上游）；查不到 `actress: null`；上游忙 `busy: true`；`502` 上游 | S-10 L-12 |
+| POST | `/api/ltx/actress/backfill` | — | `{ok, started, running, actress_done, actress_pending}`（幂等；没装后台线程时 `started: false`） | L-12 |
 | POST | `/api/ltx/{id}/forward` | — | `{ok, message_id}`；`409` 已转发 | S-10 T-7 |
 | POST | `/api/ltx/forward` | `?date=` | `{sent, skipped, failed, errors}` | S-10 T-2 |
 
@@ -1465,7 +1493,7 @@ log.error("emby.sync.failed", exc_info=True)     # 但不影响浏览
 | ADR-23 | **LTX 封面经 AVdb 的 `img-proxy` 取，不直连图床** | 图床对直连返回加密字节（热链保护）；顺带把出网交给 AVdb | 直连图床：拿不到图（PIL 无法识别），且本机得为图床配代理 |
 | ADR-24 | **媒体库多选存逗号串（`emby.library`），不新增键、不迁移** | 单选时代的裸 id 与多选的 `"a,b"` 被同一个 `parse_library_ids` 吃掉；省掉迁移与「两个键谁优先」的判定 | 新增 `emby.libraries`：要迁移，还得定义并存时的优先级，收益为零 |
 | ADR-25 | **多库**逐库**拉取再合并，不传多值 `ParentId`** | `/Items` 的 `ParentId` 是单值参数，传多值不报错、只静默命中一个库（「明明在库里却没角标」） | 逗号拼一条 / 重复同名参数 / `AncestorIds`：前两者静默错，后者无文档保证 |
-| ADR-26 | **LTX 演员走「灯箱懒加载 + 进程内缓存」，不在同步时全量补** | javdb 详情未缓存 0.6–14 s 且**并发即 502**（6 路 → 40/40 失败），1164 条回填要 30–60 分钟；用户只会看其中一小部分 | 同步时补全：同步从 3.6 秒变成半小时，且一并发就把用户的 javdb 账号打到限流 |
+| ADR-26 | **LTX 演员「同步后后台串行回填、落库」，卡片直接读库**（v1.3 调整；v1.2 是灯箱懒加载+进程内缓存） | javdb 详情未缓存 0.6–14 s 且**并发即 502**（6 路 → 40/40 失败）——所以不能塞进同步请求，也不能并发；但只查灯箱意味着**卡片上没有演员**（与 4K 长得不一样）、同一条反复看反复付成本。落库 + 后台单线程是唯一同时满足「卡片有名字」「不打爆上游」的做法 | ① 同步时全量补：同步从 4 秒变半小时，一并发就把用户的 javdb 账号打到限流；② 只查灯箱：卡片与 4K 不一致，且每次重看都再付 0.6–14 s；③ 全量并发补：40/40 全 502 |
 
 ---
 

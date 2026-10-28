@@ -613,34 +613,49 @@ SW 检测到新版本
 1.88×（DPR=2 时 3.8×）→ 大图模糊，故增设原图档（见 §8.5 与
 ``migrations/006_original_images.sql``）。
 
-#### 灯箱演员：4K 自带、LTX 懒加载（L-12）
+#### 演员：4K 自带、LTX 后台补、两者都读 DTO（L-12）
 
-灯箱头部是 `<span class="lb-code">` + `<span class="lb-actress">`。两源拿数据的
-方式不同，**渲染路径只有一条**：
+灯箱头部是 `<span class="lb-code">` + `<span class="lb-actress">`，卡片头部是
+`<span class="info-code">` + `<span class="info-actress">`。**两个来源现在是同一
+副样子**：番号右边就是演员名，字段都是 DTO 的 `actress`，渲染代码一条：
 
 | 来源 | `actress` 从哪来 | 时机 |
 |---|---|---|
-| 4K | 采集时解析的 DTO 字段 | 随列表到达，`openLightbox` 直接写文本 |
-| LTX | `GET /api/ltx/{id}/actress`（后端顺 `detail_url` 查 javdb） | **打开灯箱那一刻**才查 |
+| 4K | 采集时解析进 `posts.actress` | 随列表到达 |
+| LTX | 同步后**后台回填**进 `ltx_items.actress`（`bt169/actress.py`） | 随列表到达（已补到的那部分） |
+
+前端因此只剩两件小事：
+
+**① 补齐进度（`maybeBackfillActress` / `scheduleActressPoll`）**
+
+首次同步完 1450 条要串行问半小时，用户打开页面时那一天的卡可能还没轮到。
+所以：
 
 ```js
-// ui/app.js：只查用户真正点开的那一条
-if (isLtx() && !p.actress) loadActress(p);   // 先占位，回来再填
-else                      paintActress(p);   // 4K / 已查过
+api.getLtxStatus()                       // actress_pending > 0 ?
+  .then(maybeBackfillActress)            // → POST /api/ltx/actress/backfill（幂等）
+      → toast('正在补齐 N 条演员信息…')
+      → scheduleActressPoll();           // 每 20 s 重取当前这一天，最多 8 次
 ```
 
-四条约束（都不是「可选优化」，实测逼出来的）：
+轮询**只重取当前这一天**（打的是本机 SQLite，零上游请求），拿到新演员后
+逐个 `patchCardActress(p)` 补到**已渲染**的卡片上——不 `render()`、不重放入场
+动画、不跳滚动位置。切走日期 / 切回 4K 时定时器自动作废（`activeDate` 与
+`isLtx()` 双重校验）。
+
+**② 灯箱插队（`loadActress`）**
+
+点开的那条若还在待办队列里（`p.actress` 为空），调
+`GET /api/ltx/{id}/actress`：后端立刻查这一条、**落库**，返回即显示，卡片徽章
+也一并补上。再打开就是库里的了。
 
 | 约束 | 做法 |
 |---|---|
-| 未缓存 0.6–14 秒 | 占位文字 `.lb-actress[data-state="loading"]::after { content:'查询演员…' }`，回来**同一个元素**换文本，不跳动 |
-| 并发即 502（上游限流） | 不随卡片列表批量取；后端另有串行闸门，只查灯箱这一条 |
-| 查不到 / 上游挂 / 忙 | **一律静默**（不弹 toast）：演员是锦上添花，用户没请求它。`busy` 还不写缓存，下次打开再问 |
+| 未缓存 0.6–14 秒（仅插队时遇到） | 占位文字 `.lb-actress[data-state="loading"]::after { content:'查询演员…' }`，回来**同一个元素**换文本，不跳动 |
+| 并发即 502（上游限流） | 卡片列表**从不**逐条取演员；后端串行闸门 + 后台单线程回填，前端不参与并发 |
+| 查不到 / 上游挂 / 忙 | **一律静默**（不弹 toast）：演员是锦上添花，用户没请求它。`busy` 还不写前端缓存，下次打开再问 |
 | 连点开多条，慢响应串台 | 全局 `lbToken` 序号：回来时 `token !== lbToken` 直接丢弃 |
-
-成功后面板顺手调用 `patchCardActress(p)` 把徽章补到**已渲染**的那张卡上
-（不整页 `render()`，避免网格重放入场动画），并写进 `actressCache[tid]`，
-本次会话内重开秒开。
+| 卡片名字太长（多人「、」连接） | 名字单独包一层 `.info-actress-name`（`overflow:hidden; text-overflow:ellipsis`）：`text-overflow` 对 inline-flex 的**匿名文本项无效**（只会硬切，中文切在字中间），所以容器只管对齐图标、省略号落在内层盒子；番号 `flex-shrink: 0` 永不被挤压（实测 4 档名字长度下番号宽度恒定） |
 
 ### 8.4 空态与错误态
 

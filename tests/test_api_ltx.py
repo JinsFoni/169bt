@@ -345,118 +345,127 @@ def test_ltx_paths_are_gated(db, box):
         assert c.get("/api/ltx/dates").status_code == 401
 
 
-# ---------------------------------------------------------------- 演员（按需查询）
+# ---------------------------------------------------------------- 演员（L-12）
 #
-# LTX 资源对象里没有演员字段，灯箱打开时才向 AVdb 的 javdb 模块问一次。
-# 这里钉住：命中/查不到/上游失败三种口径、进程内缓存、以及「上游忙」的降级。
+# AVdb 的资源对象里没有演员，得逐条问它的 javdb 模块。落库之后卡片和灯箱
+# 都直接读库；这里的接口只是「那条还没轮到回填时插队查一次」。
+# 钉住：查到就落库、库里有时不再问上游、查不到也记账（否则永远重查）、
+# 上游失败不记账、上游忙降级、以及同步后自动叫回填。
 
 
-@pytest.fixture(autouse=True)
-def _clear_actress_cache():
-    """演员缓存是**进程级**的，测试之间必须清干净（否则互相串味）。"""
-    ltx_routes._actress_cache.clear()
-    yield
-    ltx_routes._actress_cache.clear()
+class FakeLookup:
+    """替身 ``LtxSource.lookup_actress`` 的记录本（含可注入的结果/异常）。"""
+
+    def __init__(self, result=("三上悠亜", "mk01"), exc=None):
+        self.result = result
+        self.exc = exc
+        self.calls = []
+
+    def __call__(self, *, detail_url=None, number=None):
+        self.calls.append((detail_url, number))
+        if self.exc is not None:
+            raise self.exc
+        return self.result
 
 
-class _Resp:
-    def __init__(self, status, payload):
-        self.status_code = status
-        self.text = json.dumps(payload)
-        self._payload = payload
+def stub_actress(monkeypatch, *, result=("三上悠亜", "mk01"), exc=None):
+    """替换 ``LtxSource.lookup_actress``。
 
-    def json(self):
-        return self._payload
+    ★ 必须换成**真函数**（而不是可调用对象）：只有函数描述符才会把
+      ``self`` 绑上去，直接塞个对象会让实现侧收到 ``mock`` 而不是 source。
+    """
+    rec = FakeLookup(result=result, exc=exc)
 
+    def fake(self, *, detail_url=None, number=None):
+        return rec(detail_url=detail_url, number=number)
 
-class FakeLoginHTTP:
-    """假 ``AvdbClient`` 传输层：只实现登录（``force`` 重登记账用）。"""
-
-    def __init__(self, token="JWT1"):
-        self.token = token
-        self.logins = 0
-
-    def post(self, url, *, json=None, data=None, headers=None, timeout=None):
-        self.logins += 1
-        return _Resp(200, {"code": 0, "data": {"access_token": self.token}})
-
-    def close(self):
-        pass
+    monkeypatch.setattr(LtxSource, "lookup_actress", fake)
+    return rec
 
 
-def seed_ltx_creds(db, box, *, jwt="JWT1"):
-    """配好 AVdb 地址/账号 + 已缓存的 JWT（``source.token()`` 直接命中缓存）。"""
-    from bt169.avdb import JWT_KEY
+def seed_ltx_creds(db, box):
+    """配好 AVdb 地址/账号（``lookup_actress`` 之前的 ``configured`` 检查用）。"""
     from bt169.repo.settings import SettingsRepo
 
     sr = SettingsRepo(db, box)
     sr.put(config.section_key("ltx", "base_url"), "http://avdb")
     sr.put(config.section_key("ltx", "username"), "u")
     sr.put(config.section_key("ltx", "password"), "p")
-    if jwt:
-        sr.put(JWT_KEY, jwt)
 
 
-def stub_actress(monkeypatch, *, result=("三上悠亜", "mk01"), exc=None):
-    """替换上游查询，返回调用记录（用来断言缓存是否生效）。"""
-    calls = []
+class FakeBackfiller:
+    """替身回填器：只记账 ``start()``，不起线程（单测里绝不要真线程）。"""
 
-    def fake(base_url, *, detail_url=None, number=None, token=None):
-        calls.append((base_url, detail_url, number, token))
-        if exc is not None:
-            raise exc
-        return result
+    def __init__(self, running=False, start_returns=True):
+        self.starts = 0
+        self.running = running
+        self._returns = start_returns
+        self.stops = 0
 
-    monkeypatch.setattr(ltx_routes, "movie_actress", fake)
-    return calls
+    def start(self):
+        self.starts += 1
+        self.running = True
+        return self._returns
+
+    def stop(self, timeout=2.0):
+        self.stops += 1
+        self.running = False
 
 
-def test_actress_returns_name(app, db, box, monkeypatch):
+@pytest.fixture()
+def backfiller(app):
+    """把替身回填器挂进 ``app.state``（生产里由 lifespan 装）。"""
+    fake = FakeBackfiller()
+    app.app.state.actress_backfiller = fake
+    return fake
+
+
+def test_actress_returns_name_and_persists(app, db, box, monkeypatch):
     seed(db)
     seed_ltx_creds(db, box)
-    calls = stub_actress(monkeypatch)
+    fake = stub_actress(monkeypatch)
+
     r = app.get("/api/ltx/1/actress")
     assert r.status_code == 200
     assert r.json() == {
         "ok": True, "actress": "三上悠亜", "movie_id": "mk01", "cached": False,
     }
-    assert len(calls) == 1
-    # 传下去的是本地镜像里的 detail_url、编号，以及上游要求的 JWT
-    assert calls[0][1] == "https://javdb.com/v/x"
-    assert calls[0][2] == "SSIS-157"
-    assert calls[0][3] == "JWT1"
+    assert fake.calls == [("https://javdb.com/v/x", "SSIS-157")]
+
+    # ★ 落库：卡片和灯箱下次直接读，不再问上游
+    item = LtxRepo(db).get(1)
+    assert item.actress == "三上悠亜"
+    assert item.actress_at
+    # 列表接口带着演员回来（前端卡片徽章就靠这个字段）
+    posts = app.get("/api/ltx/posts", params={"date": "2026-10-25"}).json()
+    by_tid = {p["tid"]: p for p in posts}
+    assert by_tid[1]["actress"] == "三上悠亜"
+    assert by_tid[2]["actress"] is None       # 没查过的仍为空
 
 
-def test_actress_second_open_uses_cache(app, db, box, monkeypatch):
+def test_actress_second_open_reads_db_without_upstream(app, db, box, monkeypatch):
     seed(db)
     seed_ltx_creds(db, box)
-    calls = stub_actress(monkeypatch)
+    fake = stub_actress(monkeypatch)
     app.get("/api/ltx/1/actress")
     body = app.get("/api/ltx/1/actress").json()
     assert body["actress"] == "三上悠亜"
     assert body["cached"] is True
-    assert len(calls) == 1          # 第二次没再问上游
+    assert len(fake.calls) == 1          # 第二次没再问上游
 
 
-def test_actress_cache_drops_when_number_changes(app, db, box, monkeypatch):
-    """重新同步后编号/指向变了，旧结果不能再用。"""
-    seed(db)
-    seed_ltx_creds(db, box)
-    calls = stub_actress(monkeypatch)
-    app.get("/api/ltx/1/actress")
-    LtxRepo(db).upsert_many([row(1, number="NEW-001")], now_iso())
-    app.get("/api/ltx/1/actress")
-    assert len(calls) == 2
-
-
-def test_actress_not_found_is_200_with_null(app, db, box, monkeypatch):
-    """查不到不是错误：前端据此静默不显示。"""
+def test_actress_not_found_is_200_and_recorded(app, db, box, monkeypatch):
+    """查不到不是错误：返回 null，但**要记时间**——否则回填会永远重查这条。"""
     seed(db)
     seed_ltx_creds(db, box)
     stub_actress(monkeypatch, result=(None, None))
+
     r = app.get("/api/ltx/1/actress")
     assert r.status_code == 200
     assert r.json()["actress"] is None
+    item = LtxRepo(db).get(1)
+    assert item.actress is None
+    assert item.actress_at is not None
 
 
 def test_actress_unknown_item_404(app):
@@ -465,77 +474,120 @@ def test_actress_unknown_item_404(app):
     assert r.json()["error"]["code"] == "not_found"
 
 
-def test_actress_upstream_error_is_502(app, db, box, monkeypatch):
+def test_actress_upstream_error_is_502_and_not_recorded(app, db, box, monkeypatch):
+    """★ 上游失败不能记账，否则这条会永远显示「没有演员」。"""
     seed(db)
     seed_ltx_creds(db, box)
     stub_actress(monkeypatch, exc=AvdbError("AVdb 返回 HTTP 502：bad gateway"))
+
     r = app.get("/api/ltx/1/actress")
     assert r.status_code == 502
     assert r.json()["error"]["code"] == "ltx_upstream"
+    assert LtxRepo(db).get(1).actress_at is None
 
 
 def test_actress_not_configured_is_400(app, db, monkeypatch):
-    """没填 AVdb 账号 → ``source.token()`` 直接拒绝，压根不打上游。"""
+    """没填 AVdb 账号 → 压根不打上游。"""
+    from bt169 import avdb
+
     seed(db)
-    calls = stub_actress(monkeypatch)
+    calls = []
+    monkeypatch.setattr(
+        avdb, "movie_actress", lambda *a, **kw: calls.append((a, kw))
+    )
     r = app.get("/api/ltx/1/actress")
     assert r.status_code == 400
     assert r.json()["error"]["code"] == "ltx_not_configured"
     assert calls == []
 
 
-def test_actress_relogins_once_when_jwt_rejected(app, db, box, monkeypatch):
-    """JWT 被作废 → 用凭据重登一次再试（与同步同一个自救策略）。"""
-    from bt169.avdb import JWT_KEY
-    from bt169.repo.settings import SettingsRepo
-
-    seed(db)
-    seed_ltx_creds(db, box, jwt="OLD")
-    calls = []
-
-    def fake(base_url, *, detail_url=None, number=None, token=None):
-        calls.append(token)
-        if token == "OLD":
-            raise AvdbAuthError("AVdb 鉴权失败")
-        return ("三上悠亜", "mk01")
-
-    monkeypatch.setattr(ltx_routes, "movie_actress", fake)
-
-    # force 登录走假 HTTP：返回新令牌
-    source = LtxSource(SettingsRepo(db, box), http=FakeLoginHTTP("NEW"))
-    app.app.dependency_overrides[ltx_routes.get_source] = lambda: source
-    try:
-        body = app.get("/api/ltx/1/actress").json()
-    finally:
-        app.app.dependency_overrides.clear()
-
-    assert body["actress"] == "三上悠亜"
-    assert calls == ["OLD", "NEW"]
-    assert SettingsRepo(db, box).get(JWT_KEY) == "NEW"    # 新令牌已落库
-
-
-def test_actress_error_is_not_cached(app, db, box, monkeypatch):
-    """上游失败**不能**落缓存，否则这一条会永远没有演员。"""
-    seed(db)
-    seed_ltx_creds(db, box)
-    stub_actress(monkeypatch, exc=AvdbError("boom"))
-    assert app.get("/api/ltx/1/actress").status_code == 502
-    stub_actress(monkeypatch)        # 上游恢复
-    assert app.get("/api/ltx/1/actress").json()["actress"] == "三上悠亜"
-
-
 def test_actress_busy_degrades_instead_of_queueing(app, db, box, monkeypatch):
-    """闸门被占 → 立刻回 busy（不打上游、不缓存），而不是排队堆请求。"""
+    """闸门被占 → 立刻回 busy（不打上游、不落库），而不是排队堆请求。"""
+    from bt169 import actress as actress_mod
+
     seed(db)
     seed_ltx_creds(db, box)
-    calls = stub_actress(monkeypatch)
-    monkeypatch.setattr(ltx_routes, "_ACTRESS_WAIT", 0.01)
-    ltx_routes._actress_lock.acquire()
+    fake = stub_actress(monkeypatch)
+    monkeypatch.setattr(actress_mod, "GATE_WAIT", 0.01)
+    actress_mod.GATE.acquire()
     try:
         body = app.get("/api/ltx/1/actress").json()
     finally:
-        ltx_routes._actress_lock.release()
+        actress_mod.GATE.release()
 
     assert body == {"ok": True, "actress": None, "busy": True}
-    assert calls == []                       # 一次上游请求都没发
+    assert fake.calls == []                       # 一次上游请求都没发
     assert app.get("/api/ltx/1/actress").json()["actress"] == "三上悠亜"
+
+
+def test_actress_renumber_invalidates_old_result(app, db, box, monkeypatch):
+    """重新同步换了编号 → 旧演员作废（否则会一直显示上一部片的女优）。"""
+    seed(db)
+    seed_ltx_creds(db, box)
+    stub_actress(monkeypatch)
+    app.get("/api/ltx/1/actress")
+
+    LtxRepo(db).upsert_many([row(1, number="NEW-001")], now_iso())
+    item = LtxRepo(db).get(1)
+    assert item.actress is None
+    assert item.actress_at is None
+    assert app.get("/api/ltx/1/actress").json()["cached"] is False
+
+
+# ---------------------------------------------------------------- 演员补齐（回填）
+
+
+def test_status_reports_actress_progress(app, db):
+    seed(db, [row(1), row(2)])
+    LtxRepo(db).set_actress(1, "三上悠亜", "2026-10-26T10:00:00+08:00")
+
+    body = app.get("/api/ltx/status").json()
+    assert body["actress_done"] == 1
+    assert body["actress_pending"] == 1
+    assert body["actress_running"] is False       # 单测没有后台线程
+
+
+def test_backfill_endpoint_starts_worker(app, db, backfiller):
+    seed(db, [row(1)])
+    body = app.post("/api/ltx/actress/backfill").json()
+    assert body["ok"] is True
+    assert body["started"] is True
+    assert body["running"] is True
+    assert body["actress_pending"] == 1
+    assert backfiller.starts == 1
+
+
+def test_backfill_endpoint_is_idempotent(app, db, backfiller):
+    """多个标签页同时打开时不要起两个回填线程（它们会各自打上游）。"""
+    seed(db)
+    backfiller._returns = False        # 真的回填器：已在跑就返回 False
+    body = app.post("/api/ltx/actress/backfill").json()
+    assert body["started"] is False
+    assert body["running"] is True
+
+
+def test_backfill_endpoint_without_worker_is_noop(app, db):
+    """没启用后台定时器（单测/精简装配）→ 空操作，不报错。"""
+    seed(db)
+    body = app.post("/api/ltx/actress/backfill").json()
+    assert body == {
+        "ok": True, "started": False, "running": False,
+        "actress_done": 0, "actress_pending": 2,
+    }
+
+
+def test_sync_kicks_backfill(app, db, backfiller, monkeypatch):
+    """★ 同步完就把演员补齐跑起来——这正是「更新资源时保存下来」的那一步。"""
+    monkeypatch.setattr(
+        ltx_routes.LtxSource, "fetch_all", lambda self: [row(1), row(2)]
+    )
+    body = app.post("/api/ltx/sync").json()
+    assert body["actress_pending"] == 2
+    assert backfiller.starts == 1
+
+
+def test_sync_without_backfiller_still_succeeds(app, db, monkeypatch):
+    monkeypatch.setattr(ltx_routes.LtxSource, "fetch_all", lambda self: [row(1)])
+    body = app.post("/api/ltx/sync").json()
+    assert body["ok"] is True
+    assert body["fetched"] == 1

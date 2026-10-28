@@ -66,3 +66,14 @@ def test_format_size_units():
     assert format_size(0) is None
     assert format_size(3607826070) == "3.4GB"
     assert format_size(700 * 1024 ** 2) == "700MB"
+
+
+def test_actress_is_passed_through():
+    """★ 卡片头一行的演员徽章直接吃 DTO 的这个字段（与 4K 同一套渲染）。"""
+    dto = LtxPostDTO.from_item(item(actress="歌野こころ、足立友梨")).to_dict()
+    assert dto["actress"] == "歌野こころ、足立友梨"
+
+
+def test_actress_is_none_when_not_backfilled():
+    dto = LtxPostDTO.from_item(item(actress=None, actress_at=None)).to_dict()
+    assert dto["actress"] is None

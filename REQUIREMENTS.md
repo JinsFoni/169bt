@@ -253,7 +253,7 @@ GET https://169bt.com/forum.php?mod=forumdisplay&fid=192&orderby=dateline&page=N
 | L-9 | 设置项 | AVdb 地址 / 账号 / 密码 / API Key（可选）+ 上次同步时间与本地条数提示 |
 | L-10 | 配置校验 | 地址必须是完整 `http(s)://`，尾部斜杠归一 |
 | L-11 | 番号 | 直接用上游 `number` 字段（本地镜像 1450/1450 全有），即卡片上的番号、也是 Emby 角标匹配的 `code` |
-| L-12 | 演员（按需） | 上游资源对象**没有**演员字段；**打开灯箱时**顺 `detail_url` 查 AVdb 的 javdb 模块取女优（`gender==0`），进程内缓存、上游串行；查不到就**不显示**，不弹错误；卡片上不预先显示（一页 20 条会把 javdb 打到 502） |
+| L-12 | 演员（同步后后台补齐、落库） | 上游资源对象**没有**演员字段；**同步成功后**由后台线程顺 `detail_url` 逐条查 AVdb 的 javdb 模块取女优（`gender==0`），**落库**（`ltx_items.actress`/`actress_at`），卡片与灯箱此后只读库——与 4K 卡片同一副样子。串行 + 0.5 s 间隔（并发即 502），按 `publish_date` 倒序（用户正在看的最近几天先有）；查不到/上游失败一律**静默**，不弹错误；灯箱里那条若还没轮到会立刻插队查一次并落库 |
 
 ---
 
@@ -471,17 +471,17 @@ ed2k      : ed2k://|file|s169bbs.com@START-624_[4K].mkv|7515146184|0B17E95CBBA18
 | JWT 载荷 | `{"sub":"mario","ver":0}` —— **没有 `exp`**，无法预判过期；只能靠 401 触发重登 |
 | 检索鉴权 | `POST /api/v1/articles/search` **只认 `Authorization: Bearer <JWT>`**。`X-API-Key` / `?api_key=` / `?access_token=` 全部 401：`{"detail":"Not authenticated"}`（无令牌）或 `{"detail":"Token 无效"}`（令牌无效/过期） |
 | 检索请求体 | `{"page":1,"page_size":100,"website":"ltx","section":"LTX破解"}`；`page_size` 上限 100 |
-| 检索响应 | `data = {page, pageSize, total: 658, hasMore, items[]}` |
+| 检索响应 | `data = {page, pageSize, total: 1450, hasMore, items[]}` |
 | 条目字段 | `tid`（16 位合成整数）、`title`、`number`、`publish_date`、`size_bytes`、`magnet`（LTX 这里是 ed2k）、`preview_images`、`detail_url`、`section`、`create_time`、`rejected`、`emby_*`、`tags` |
-| 全量规模 | **658 条 / 7 页 / 约 3.6 秒**（2026-10-28 实测） |
-| `GET /api/v1/stats` | 可用 API Key 调，返回 `{'alias':'LTX破解','site':'ltx','count':658}` |
+| 全量规模 | **1450 条 / 15 页 / 约 4 秒**（2026-10-28 实测；三周前是 658 条 / 7 页）。★ 条数一直在涨，翻页上限 `AVDB_MAX_PAGES` 只作死循环兜底（100） |
+| `GET /api/v1/stats` | 可用 API Key 调，返回 `{'alias':'LTX破解','site':'ltx','count':1450}` |
 | `GET /api/v1/articles/torrents?keyword=` | 只做关键字 LIKE（number+title）、**无分页**：`SSIS`→3346 条（含 36 条 ltx）、`157`→771 条、`%`→448296 条/277 MB、`-`→358746 条/222 MB。**不能用来列全量** |
 | 图床直连 | `tp.spfcas.com` 返回 159 500 B `binary/octet-stream`（无 JPEG magic，PIL 无法识别）——热链保护，拿到的是加密字节 |
 | 图床代理 | `GET /api/v1/img-proxy/?url=<urlencoded>&mode=cover&w=&q=&fmt=webp&cover_all=0` → 正常 JPEG/WebP，**无需鉴权**。AVdb 前端（`src-lib-image-cache`）就是这么包所有远端图片的 |
 | `preview_images` 形状 | 三种：单 URL / **逗号分隔的多 URL** / 数组。必须按逗号切分（前端也是 `split(",")`） |
 | 代理 | AVdb 在**局域网**，客户端必须 `trust_env=False`，否则会被应用/环境里的外网代理劫持 |
 | 演员字段 | 条目里**没有** `actors`（只有 `tid/number/title/magnet/size_bytes/preview_images/detail_url/section/tags/resource_tags/in_stock/rejected/create_time/update_time/emby_*/website/category/img_list/image_count/has_local_subtitle`）。`actors` 只出现在导入载荷 `RawManualDownloadPayload` 里 |
-| javdb 详情 | `GET /api/v1/javdb/movies/{movie_id}` —— **无需鉴权**（AVdb 用它自己的 javdb 账号 `avdbym` 代理），返回 `movie.actors[{id,name,gender,avatar_url}]`（`gender` 0=女 1=男）+ `release_date/maker_name/tags/series_name/score` |
+| javdb 详情 | `GET /api/v1/javdb/movies/{movie_id}` —— **要带 JWT**（OpenAPI 写 `security: None`，实测不带令牌一律 401 `{"detail":"API Key 或 Token 鉴权失败"}`；AVdb 用它自己的 javdb 账号 `avdbym` 代理），返回 `movie.actors[{id,name,gender,avatar_url}]`（`gender` 0=女 1=男）+ `release_date/maker_name/tags/series_name/score` |
 | javdb movie id | 就在 `detail_url` 里：`https://javdb.com/v/822NKW`（镜像域名 `javdb580.com` 路径相同）。本地镜像 1450 条中 **1164 条（80%）** 有；其余按编号搜 |
 | javdb 按编号搜 | `GET /api/v1/javdb/search?q=<番号>&limit=n` → `data.movies[]`（含 `id/number/title/release_date`），**必须校验编号完全一致**（搜 `DPMI-020` 会混进 `DPMU-020`） |
 | javdb 速率 | 未缓存一次 **0.6–14 s**（长尾在 javdb 侧）；AVdb 有缓存，同 id 第二次 **10–15 ms**。**并发即 502**：6 路并行 → 40/40 失败；串行 +0.5 s 间隔 → 全成功 |

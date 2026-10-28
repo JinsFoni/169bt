@@ -565,3 +565,67 @@ def test_source_token_force_relogins(db, box):
 def test_source_token_without_credentials_raises(db, box):
     with pytest.raises(AvdbNotConfigured):
         LtxSource(SettingsRepo(db, box)).token()
+
+
+# ---------------------------------------------------------------- LtxSource.lookup_actress
+#
+# 演员的唯一入口：地址 + JWT + 「401 后重登一次」都在这里。回填器
+# （bt169/actress.py）和灯箱插队接口都只调这一个方法，所以这层必须钉住。
+
+
+def _stub_movie_actress(
+    monkeypatch, *, fail_on=None, always_fail=False, result=("三上悠亜", "mk01")
+):
+    calls = []
+
+    def fake(base_url, *, detail_url=None, number=None, token=None):
+        calls.append((base_url, detail_url, number, token))
+        if always_fail or (fail_on is not None and token == fail_on):
+            raise AvdbAuthError("AVdb 鉴权失败")
+        return result
+
+    monkeypatch.setattr(avdb, "movie_actress", fake)
+    return calls
+
+
+def test_lookup_actress_uses_cached_token(db, box, monkeypatch):
+    sr = _creds(db, box)
+    sr.put(avdb.JWT_KEY, "CACHED")
+    calls = _stub_movie_actress(monkeypatch)
+
+    names = LtxSource(sr, http=FakeHTTP()).lookup_actress(
+        detail_url="https://javdb.com/v/mk01", number="SSIS-157"
+    )
+    assert names == ("三上悠亜", "mk01")
+    assert calls == [("http://avdb", "https://javdb.com/v/mk01", "SSIS-157", "CACHED")]
+
+
+def test_lookup_actress_relogins_once_after_401(db, box, monkeypatch):
+    """★ 令牌被作废（改密码 → ver 变了）时重登**一次**再试，与同步同策略。"""
+    sr = _creds(db, box)
+    sr.put(avdb.JWT_KEY, "OLD")
+    calls = _stub_movie_actress(monkeypatch, fail_on="OLD")
+    http = FakeHTTP()
+
+    names = LtxSource(sr, http=http).lookup_actress(number="SSIS-157")
+
+    assert names == ("三上悠亜", "mk01")
+    assert [c[3] for c in calls] == ["OLD", "JWT1"]
+    assert len(http.calls) == 1                 # 只登录一次，不是暴力重试
+    assert sr.get(avdb.JWT_KEY) == "JWT1"       # 新令牌已落库
+
+
+def test_lookup_actress_reraises_when_relogin_also_fails(db, box, monkeypatch):
+    sr = _creds(db, box)
+    sr.put(avdb.JWT_KEY, "OLD")
+    _stub_movie_actress(monkeypatch, always_fail=True)   # 重登后的令牌也不好使
+
+    with pytest.raises(AvdbAuthError):
+        LtxSource(sr, http=FakeHTTP()).lookup_actress(number="SSIS-157")
+
+
+def test_lookup_actress_without_credentials_raises(db, box, monkeypatch):
+    calls = _stub_movie_actress(monkeypatch)
+    with pytest.raises(AvdbNotConfigured):
+        LtxSource(SettingsRepo(db, box)).lookup_actress(number="SSIS-157")
+    assert calls == []                          # 一次上游请求都没发

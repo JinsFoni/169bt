@@ -14,7 +14,8 @@ __all__ = ["Database", "SCHEMA_VERSION"]
 
 #: 当前 schema 版本。新增迁移文件时递增。
 #: 7 = 007_ltx.sql（LTX 数据源镜像表）
-SCHEMA_VERSION = 7
+#: 8 = 008_ltx_actress.sql（LTX 演员落库，供卡片直接展示）
+SCHEMA_VERSION = 8
 
 _MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 

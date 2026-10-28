@@ -189,6 +189,12 @@ class LtxItem:
     created_at: str | None
     tg_sent_at: str | None
     fetched_at: str
+    #: 演员名（多人用「、」连接），来自 javdb，**同步后由后台补齐**（L-12）。
+    actress: str | None = None
+    #: 上次查演员的时间。``None`` = 还没查过；有值但 ``actress`` 为空 =
+    #: 查过了、上游确实没有（或编号对不上）。两者不能混为一谈，
+    #: 否则回填会把「确认没有」的行每天重查一遍。
+    actress_at: str | None = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> LtxItem:
@@ -204,8 +210,12 @@ class LtxPostDTO:
       tg_sent_at}`` 消费。对齐之后 LTX 页复用同一套渲染代码，
       而不是复制一份改字段名——两份卡片模板以后必然走形。
 
-    ``actress`` 恒为 ``None``（AVdb 的 LTX 条目没有演员字段）；
-    ``detail`` 同理（只有一张封面）。
+    ``actress`` 来自 javdb，由同步后的后台回填写进 ``ltx_items``（L-12）——
+    所以 LTX 卡片现在与 4K 卡片是同一副样子：番号右边就是演员名。
+    还没回填到的那条是 ``None``，界面什么都不显示（与「确实没有演员」
+    表现一致，用户不需要区分）。
+
+    ``detail`` 恒为 ``None``（LTX 只有一张封面）。
     """
 
     tid: int
@@ -252,7 +262,7 @@ class LtxPostDTO:
             tid=item.id,
             title=item.title or "",
             code=item.number,
-            actress=None,
+            actress=item.actress,
             release_date=item.publish_date,
             size=format_size(item.size_bytes),
             cover=cover or fallback,

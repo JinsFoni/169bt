@@ -242,17 +242,20 @@ def image_fetch(src_url: str, *, base_url: str) -> bytes:
 # 自己的导入载荷 schema 里）。演员藏在 AVdb 的 **javdb 模块**后面：
 #
 #   ``detail_url = https://javdb.com/v/822NKW``   ← 末尾就是 javdb movie id
-#   ``GET /api/v1/javdb/movies/822NKW``           ← 无需鉴权（AVdb 用它自己的
-#                                                    javdb 账号代理），返回
+#   ``GET /api/v1/javdb/movies/822NKW``           ← **要带 JWT**（OpenAPI 里写
+#                                                    ``security: None``，实测
+#                                                    不带令牌 401），返回
 #                                                    ``actors[] / release_date /
 #                                                    maker_name / tags / series``
 #
-# ★ 为什么**懒加载**而不是同步时全量补：实测（2026-10）
-#   - 未缓存一次 0.6–14 秒（长尾严重），1164 条全量回填要 30–60 分钟；
-#   - **不能并发**：6 路并行 → 40/40 全 502（javdb 侧限流，用的是用户自己
-#     的 javdb 账号）；串行 +0.5 秒间隔 → 全成功；
-#   - AVdb 自己有缓存，同一 id 第二次 10–15 ms。
-#   所以做成「打开灯箱时查一条」，用户点开的那条 1 秒内就有，其余不付成本。
+# ★ 为什么**不能一口气全量补**（实测 2026-10）：未缓存一次 0.6–14 秒
+#   （长尾严重，1450 条实测 2–5 秒/条，全量要一小时上下）；而且**不能并发**——6 路并行
+#   → 40/40 全 502（javdb 侧限流，用的是用户自己的 javdb 账号），
+#   串行 +0.5 秒间隔则全成功。
+#   所以补法是：同步完之后由 :class:`bt169.actress.ActressBackfiller`
+#   **在后台串行、逐条**补齐并落库（``ltx_items.actress``），新的日期优先
+#   ——用户正在看的那几天最先有。灯箱那条若还没轮到，``GET /api/ltx/{id}/
+#   actress`` 会立刻插一次队查出来（同样落库），不让用户对着空位等。
 
 #: javdb 详情页 URL → movie id。上游给的是 ``https://javdb.com/v/822NKW``，
 #: 镜像域名（``javdb580.com`` 等）路径一样，只认路径尾巴。
@@ -608,6 +611,40 @@ class LtxSource:
 
     def configured(self) -> bool:
         return load_creds(self._settings).configured
+
+    def lookup_actress(
+        self, *, detail_url: str | None = None, number: str | None = None
+    ) -> tuple[str | None, str | None]:
+        """查一条资源的演员，返回 ``(演员串, movie_id)``。
+
+        这是**演员相关的唯一入口**：背面要地址、要 JWT、401 时要重登一次，
+        这些细节接口层和回填程序都不该各写一遍。两条调用路径：
+
+        - ``GET /api/ltx/{id}/actress``（灯箱里那条还没回填到时，立刻查一次）；
+        - :class:`bt169.actress.ActressBackfiller`（同步后逐条补齐）。
+
+        Raises:
+            AvdbNotConfigured: 没填地址/账号。
+            AvdbError: 上游失败（含重登后仍 401 的情况）。
+        """
+        creds = load_creds(self._settings)
+        if not creds.configured:
+            raise AvdbNotConfigured(
+                "未配置 LTX 数据源：请到设置 → LTX 数据源填写 AVdb 地址与账号"
+            )
+        token = self.token()
+        try:
+            return movie_actress(
+                creds.base_url, detail_url=detail_url, number=number, token=token
+            )
+        except AvdbAuthError:
+            # ★ 与 ``fetch_all`` 同一个自救策略：令牌被作废（改密码 → ver
+            #   变了）时用凭据重登**一次**再试，只重试一次。
+            log.info("LTX 演员：JWT 失效，重新登录后重试")
+            token = self.token(force=True)
+            return movie_actress(
+                creds.base_url, detail_url=detail_url, number=number, token=token
+            )
 
     def synced_at(self) -> str | None:
         return self._settings.get(SYNCED_KEY)

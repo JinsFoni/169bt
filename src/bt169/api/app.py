@@ -55,6 +55,10 @@ def create_app(
     app.state.db = db
     app.state.box = box
     app.state.image_dir = image_dir
+    #: L-12 演员回填器。默认 ``None``：只有启用后台定时器（生产）时才在
+    #: lifespan 里装配。接口层一律用 ``getattr(..., "actress_backfiller", None)``
+    #: 取，因此单测环境（``emby_interval=0``）里它就是「回填能力不存在」。
+    app.state.actress_backfiller = None
 
     _install_error_handler(app)
     _install_emby_scheduler(app, emby_interval)
@@ -113,7 +117,7 @@ def create_app(
 
 
 def _make_lifespan(interval: float):
-    """构造 lifespan：启动/停止三个后台定时器。
+    """构造 lifespan：启动/停止三个后台定时器 + 装配演员回填器。
 
     三个定时器共用一个开关（``emby_interval``）：
 
@@ -126,6 +130,12 @@ def _make_lifespan(interval: float):
 
     ★ 间隔为 0 时返回一个什么都不做的 lifespan——测试入口就是这种。
     每个测试都建 app，默认开定时器会给每个测试起三个线程。
+
+    ★ **演员回填器（L-12）也挂在这个开关上**，但它不在这里启动：回填要
+    串行打 1400+ 次上游、跑半小时，不该由「服务重启」来触发。它只在
+    ``POST /api/ltx/sync``（同步完新条目）和 ``POST /api/ltx/actress/
+    backfill``（前端打开 LTX 页发现还有待补的）时被叫醒。这里只把它放进
+    ``app.state``，并在关机时叫停——否则进程退出时后台线程还在打上游。
     """
     if not interval:
         return None
@@ -147,14 +157,35 @@ def _make_lifespan(interval: float):
         poller = _build_poll_loop(app, POLL_CHECK_SECONDS)
         app.state.poll_scheduler = poller
         poller.start()
+
+        # L-12：LTX 演员回填（装配，不自动起跑，见 docstring）。
+        backfiller = _build_actress_backfiller(app)
+        app.state.actress_backfiller = backfiller
         try:
             yield
         finally:
+            backfiller.stop()
             poller.stop()
             renewer.stop()
             scheduler.stop()
 
     return lifespan
+
+
+def _build_actress_backfiller(app: FastAPI):
+    """构造 LTX 演员回填器（L-12）。每次 tick 重建数据源，改设置无需重启。"""
+    from bt169.actress import ActressBackfiller
+    from bt169.avdb import LtxSource
+    from bt169.repo.ltx import LtxRepo
+    from bt169.repo.settings import SettingsRepo
+
+    def build_source():
+        source = LtxSource(SettingsRepo(app.state.db, app.state.box))
+        # 没配地址/账号时 ``lookup_actress`` 会抛 AvdbNotConfigured，
+        # 回填器把它当「这次没问到」并收手——不会每 0.5 秒重试一次登录。
+        return source
+
+    return ActressBackfiller(build_source=build_source, ltx=LtxRepo(app.state.db))
 
 
 def _build_emby_scheduler(app: FastAPI, interval: float):
