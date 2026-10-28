@@ -217,15 +217,42 @@ window.api = {
 > `forward(tid)` / `forwardDay(date, count)` / `testTelegram()` 已实现（P6）。
 > `refreshEmby()` / `getEmbyLibraries()` 已实现（P7）。
 
-### 8.5.1 Emby 媒体库下拉的提示行（E-8）
+### 8.5.1 Emby 媒体库多选（E-9）+ 提示行（E-8）
 
-「媒体库」下拉框下面有一行 `.field-hint`，文案随后端返回的 `source` 变化：
+「媒体库」是**勾选列表**（`.libpick` + `.libitem`），不是下拉、也不是
+`<select multiple>`：原生多选要按住 Ctrl/Cmd 点，触摸板上几乎不可用，
+收起状态还看不出勾了几个。
 
-| `source` | 提示行 |
+```html
+<span class="field-label" id="embyLibLabel">媒体库 <span class="field-opt">可多选</span></span>
+<input type="hidden" id="embyLib" value="">            <!-- 真正的值：逗号串 -->
+<div class="libpick" id="embyLibList" role="group" aria-labelledby="embyLibLabel">
+  <label class="libitem is-on"><input type="checkbox" value="1373" checked>
+    <span class="libitem-name">有码</span></label>
+</div>
+<p class="field-hint" id="embyLibHint">不勾选 = 全部媒体库。</p>
+```
+
+★ **值只存在隐藏 input 里**（`#embyLib`，逗号分隔）：它挂在 `FIELDS.emby`
+表里，`fill()` / `collect()` 一行都不用改——不存在「DOM 勾选状态」与
+「提交值」两套真相。勾选变化（事件委托，列表是 `innerHTML` 重画的）→
+写回隐藏 input → 刷新提示行计数。
+
+★ **已保存但列表里没有的 id 也要画出来**（行尾标「已保存」）：Emby 里
+刚删了库、或这次连不上时，不画就是「看不见的选中项」——用户取消不了，
+也解释不了命中数为什么还是那么多。
+
+提示行随后端返回的 `source` / `warning` 变化，并**带上当前勾选数**：
+
+| 情况 | 提示行 |
 |---|---|
-| `user` | 「仅显示 Emby 用户「<名>」能访问的媒体库。」 |
-| `all`（没配用户名） | 「留空 = 全部媒体库。填了用户名则只显示该用户能访问的库。」 |
-| `all` + `warning` 非空 | 原文（如「Emby 中找不到用户「X」；已退回显示全部媒体库」），加 `.is-warn` 用警示色 |
+| `source="user"` | 「仅显示 Emby 用户「<名>」能访问的媒体库；已勾选 2 个库，任一库命中即算已入库。」 |
+| `source="all"`（没配用户名） | 「共 22 个可选媒体库；不勾选 = 全部媒体库。」 |
+| `warning` 非空 | 原文（如「Emby 中找不到用户「X」；已退回显示全部媒体库」），加 `.is-warn` |
+| 接口失败 | 「连不上 Emby，暂时拿不到媒体库列表。」（静默，不弹错） |
+
+勾选数与语义分三档：「不勾选 = 全部媒体库」/「已勾选 1 个库」/
+「已勾选 N 个库，任一库命中即算已入库」。
 
 ★ **保存后当场重拉**：改完用户名点保存，列表与提示行立即更新。
 不重拉的话用户看到的还是按**旧**用户过滤的列表，会以为过滤坏了。
@@ -610,7 +637,7 @@ SW 检测到新版本
 | 1 | **站点**（新增） | RSS 订阅链接、用户名、密码 |
 | 2 | 基础设置 | 访问密码 |
 | 3 | 网络代理 | 代理类型、主机、端口、用户名、密码 |
-| 4 | Emby | 服务器地址、API Key、用户、媒体库、定时刷新（cron） |
+| 4 | Emby | 服务器地址、API Key、用户、媒体库**多选**勾选列表（E-9）、定时刷新（cron） |
 | 5 | Telegram | MTProto api_id、api_hash（密文）、转发目标 tg.target、Bot Token、Chat ID；**MTProto 登录向导**：面板内三步（手机号→验证码→两步验证），发码后 30s 冷却倒计时禁用按钮，429 透传 `retry_after`；session 加密落库，面板只显示登录状态 |
 
 ### 9.2 「站点」分区字段

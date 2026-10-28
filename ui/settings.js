@@ -317,48 +317,115 @@
     });
   }
 
-  /*
-   * 拉 Emby 媒体库列表填进下拉框。
-   *
-   * ★ 失败静默：Emby 没配或连不上时，下拉框退化为只有一个「全部媒体库」，
-   *   不弹错误。用户可能只是还没填地址——此时报错是噪声（E-7 同样的思路）。
-   * ★ 但**已保存的库 id 必须保留为选中项**：列表拉不到时若把 value 清空，
-   *   用户一保存就把已配好的库弄丢了。
-   */
-  function loadLibraries(savedId) {
-    var sel = $('embyLib');
-    if (!sel) return;
+  /* ---------- Emby 媒体库多选（E-9） ----------
 
-    window.api.getEmbyLibraries().then(function (res) {
-      var keep = savedId || sel.value || '';
-      var opts = ['<option value="">全部媒体库</option>'];
-      ((res && res.libraries) || []).forEach(function (lib) {
-        opts.push('<option value="' + escAttr(lib.id) + '">' +
-                  escHtml(lib.name) + '</option>');
-      });
+     ★ 为什么不用 <select multiple>：原生多选要按住 Ctrl/Cmd 点，
+       触摸板上几乎不可用，且「已勾了哪几个」在收起状态看不出来。
+       勾选列表一次看全、点一下就切换。
 
-      // 已保存的 id 不在列表里（Emby 里删了/还没加载）也要保留，
-      // 否则保存一次就静默丢掉配置。
-      var known = ((res && res.libraries) || []).some(function (l) {
-        return String(l.id) === String(keep);
-      });
-      if (keep && !known) {
-        opts.push('<option value="' + escAttr(keep) + '">' +
-                  escHtml(keep) + '（当前）</option>');
-      }
+     ★ 真正的值仍是隐藏 input ``#embyLib``（逗号分隔）：它挂在 FIELDS 表里，
+       fill() / collect() 一行都不用改——值只有一个去处，不存在
+       「DOM 勾选状态」与「提交值」两套真相。 */
 
-      sel.innerHTML = opts.join('');
-      sel.value = keep;
-      renderLibHint(res);
-    }).catch(function () { /* 静默，见上 */ });
+  /* 勾选状态 → 逗号串（唯一写入口） */
+  function syncLibValue() {
+    var hid = $('embyLib');
+    if (hid) hid.value = libIdsFromBox().join(',');
   }
 
-  /* 媒体库下拉框下面的提示行。
+  function libIdsFromBox() {
+    var box = $('embyLibList');
+    if (!box) return [];
+    return Array.prototype.slice
+      .call(box.querySelectorAll('input[type="checkbox"]'))
+      .filter(function (b) { return b.checked; })
+      .map(function (b) { return b.value; });
+  }
 
-     说清楚列表是**按用户名过滤过的**还是**全部库**——否则用户会以为
-     Emby 里少了几个库（或多了几个）。source 由后端给：
-       "user" → 已按该用户权限过滤
-       "all"  → 管理员视角（没配用户名 / 用户名找不到）
+  function splitIds(csv) {
+    return String(csv || '').split(',').map(function (x) {
+      return x.trim();
+    }).filter(Boolean);
+  }
+
+  /* 画勾选列表。
+     ★ 已保存但 Emby 这次没给出来的 id 也要画出来（Emby 里刚删了库，
+       或这次连不上）：不画就是「看不见的选中项」——用户取消不了它，
+       也解释不了为什么命中数还是那么多。 */
+  function renderLibraries(libs, keepIds, emptyText) {
+    var box = $('embyLibList');
+    if (!box) return;
+
+    var picked = {};
+    keepIds.forEach(function (id) { picked[String(id)] = true; });
+
+    var rows = libs.slice();
+    var known = {};
+    rows.forEach(function (l) { known[String(l.id)] = true; });
+    keepIds.forEach(function (id) {
+      if (!known[String(id)]) {
+        rows.push({ id: String(id), name: String(id), stale: true });
+      }
+    });
+
+    if (!rows.length) {
+      box.innerHTML = '<p class="libpick-empty">' +
+        escHtml(emptyText || 'Emby 没有返回任何媒体库。') + '</p>';
+      return;
+    }
+
+    box.innerHTML = rows.map(function (l) {
+      var on = picked[String(l.id)];
+      return '<label class="libitem' + (on ? ' is-on' : '') + '">' +
+        '<input type="checkbox" value="' + escAttr(l.id) + '"' +
+        (on ? ' checked' : '') + '>' +
+        '<span class="libitem-name">' + escHtml(l.name) + '</span>' +
+        (l.stale ? '<span class="libitem-flag">已保存</span>' : '') +
+        '</label>';
+    }).join('');
+  }
+
+  /* 最近一次 /api/emby/libraries 的响应——切勾选时提示行要跟着变 */
+  var lastLibsRes = null;
+
+  /*
+   * 拉 Emby 媒体库列表填进勾选列表。
+   *
+   * ★ 失败静默：Emby 没配或连不上时列表为空，不弹错误。用户可能只是
+   *   还没填地址——此时报错是噪声（E-7 同样的思路）。
+   * ★ 但**已保存的库 id 必须保留为勾选项**：列表拉不到时若把勾选清空，
+   *   用户一保存就把已配好的库弄丢了。
+   */
+  function loadLibraries(savedCsv) {
+    var box = $('embyLibList');
+    if (!box) return;
+
+    // 本次要呈现的勾选集合：入参优先（设置里的已存值），其次 DOM 现值
+    // （保存后重拉时用的就是用户刚勾的那一份）
+    var keep = splitIds(savedCsv != null && savedCsv !== ''
+      ? savedCsv
+      : ($('embyLib') ? $('embyLib').value : ''));
+
+    window.api.getEmbyLibraries().then(function (res) {
+      lastLibsRes = res || null;
+      renderLibraries((res && res.libraries) || [], keep);
+      syncLibValue();
+      renderLibHint(res);
+    }).catch(function () {
+      lastLibsRes = null;
+      renderLibraries([], keep, '连不上 Emby，暂时拿不到媒体库列表。');
+      syncLibValue();
+      renderLibHint(null);
+    });
+  }
+
+  /* 勾选列表下方的提示行。
+
+     说清楚三件事：列表是**按用户名过滤过的**还是**全部库**（否则用户
+     会以为 Emby 里少了或多了几个库）、当前勾了几个、多选的语义。
+
+       source 由后端给： "user" → 已按该用户权限过滤
+                        "all"  → 管理员视角（没配用户名 / 用户名找不到）
      warning 非空时用警示色。 */
   function renderLibHint(res) {
     var hint = $('embyLibHint');
@@ -366,16 +433,45 @@
 
     var src = res && res.source;
     var who = (res && res.filtered_by) || '';
+    var count = libIdsFromBox().length;
     hint.classList.remove('is-warn');
 
-    if (src === 'user') {
-      hint.textContent = '仅显示 Emby 用户「' + who + '」能访问的媒体库。';
-    } else if (res && res.warning) {
+    if (res && res.warning) {
       hint.textContent = res.warning;
       hint.classList.add('is-warn');
-    } else {
-      hint.textContent = '留空 = 全部媒体库。填了用户名则只显示该用户能访问的库。';
+      return;
     }
+
+    var parts = [];
+    if (src === 'user') {
+      parts.push('仅显示 Emby 用户「' + who + '」能访问的媒体库');
+    } else if (res) {
+      parts.push('共 ' + ((res.libraries || []).length) + ' 个可选媒体库');
+    }
+
+    if (!count) {
+      parts.push('不勾选 = 全部媒体库');
+    } else if (count === 1) {
+      parts.push('已勾选 1 个库');
+    } else {
+      parts.push('已勾选 ' + count + ' 个库，任一库命中即算已入库');
+    }
+
+    hint.textContent = parts.length ? parts.join('；') + '。' : '不勾选 = 全部媒体库。';
+  }
+
+  /* 勾选/取消：更新行高亮 → 写回隐藏 input → 刷新提示行计数。
+     用事件委托（列表是 innerHTML 重画的，逐行绑定会随重画失效）。 */
+  var libBoxEl = $('embyLibList');
+  if (libBoxEl) {
+    libBoxEl.addEventListener('change', function (e) {
+      var input = e.target;
+      if (!input || input.type !== 'checkbox') return;
+      var row = input.closest('.libitem');
+      if (row) row.classList.toggle('is-on', input.checked);
+      syncLibValue();
+      renderLibHint(lastLibsRes);
+    });
   }
 
   function escHtml(s) {
@@ -604,6 +700,9 @@
       btn.disabled = false;
       if (res && res.ok) {
         var msg = '已检查 ' + res.checked + ' 帖，命中 ' + res.in_library + ' 帖';
+        // 扫了几个库要摆出来：0 命中时分不清「库选错了」还是「真没入库」，
+        // 把轮次写出来，多选有没有生效一眼可见。
+        if (res.libraries > 1) msg = res.libraries + ' 个库，' + msg;
         setState('emby', msg, 'ok');
         toast('入库状态已刷新：' + msg, 'ok', { duration: 3600 });
         // 卡片标记变了，重新拉一次列表（app.js 暴露的是 window.__archive）

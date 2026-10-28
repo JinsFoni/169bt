@@ -73,6 +73,9 @@ def emby_app(db, box, monkeypatch):
     from bt169.emby import EmbyClient
 
     http = FakeHTTP(body=items(("e1", "START-624")))
+    # ★ 真身先留住：多选用例要走**真实** build_client（只替换 HTTP 层），
+    #   否则「CSV 有没有被正确拆成逐库请求」根本测不到。
+    real_build_client = emby_routes.build_client
     monkeypatch.setattr(
         emby_routes, "build_client",
         lambda settings: EmbyClient(url="http://emby.local:8096", api_key="K",
@@ -84,7 +87,21 @@ def emby_app(db, box, monkeypatch):
         c.http = http        # type: ignore[attr-defined]
         c.db = db            # type: ignore[attr-defined]
         c.box = box          # type: ignore[attr-defined]
+        c.real_build_client = real_build_client   # type: ignore[attr-defined]
         yield c
+
+
+def use_real_build_client(c, monkeypatch):
+    """让 ``/api/emby/refresh`` 走真实 ``build_client``，只把 HTTP 换成假的。
+
+    这样 ``emby.library`` 的**存储值**（逗号串）会真的穿过
+    ``parse_library_ids`` → ``EmbyClient`` → ``ParentId`` 这条链路。
+    """
+    from bt169.api.routes import emby as emby_routes
+
+    monkeypatch.setattr(emby_routes, "build_client", c.real_build_client)
+    monkeypatch.setattr(emby_routes, "default_http",
+                        lambda *a, **kw: c.http)
 
 
 # ---------------------------------------------------------------- 刷新
@@ -184,7 +201,7 @@ def test_refresh_uses_configured_library(emby_app, monkeypatch):
     def build(settings):
         seen["library"] = settings.get(config.section_key("emby", "library"))
         return EmbyClient(url="http://e", api_key="K", http=emby_app.http,
-                          library_id=seen["library"])
+                          library_ids=seen["library"])
 
     monkeypatch.setattr(emby_routes, "build_client", build)
     set_emby(emby_app.db, emby_app.box, library="lib42")
@@ -192,6 +209,50 @@ def test_refresh_uses_configured_library(emby_app, monkeypatch):
 
     _, params, _ = emby_app.http.calls[0]
     assert params["ParentId"] == "lib42"
+
+
+def test_refresh_scans_every_selected_library(emby_app, monkeypatch):
+    """E-9：存的是逗号串 → build_client 真的逐库去拉（不靠 monkeypatch）。
+
+    ★ 这条走**真实** ``build_client``：上一版把 CSV 整个塞进单个
+      ``ParentId``，Emby 会静默只认一个库，另一个库的片子全部判
+      「未入库」——正是这个用例要挡的回归。
+    """
+    from bt169.repo.posts import PostRepo
+
+    use_real_build_client(emby_app, monkeypatch)
+    seed_post(emby_app.db, 101, "START-624")
+    set_emby(emby_app.db, emby_app.box, library="lib1,lib2")
+
+    body = emby_app.post("/api/emby/refresh").json()
+    assert body["ok"] is True, body
+    assert body["libraries"] == 2
+    assert [p.get("ParentId") for _, p, _ in emby_app.http.calls] == [
+        "lib1", "lib2"]
+    assert PostRepo(emby_app.db).get(101).emby_status == "in_library"
+
+
+def test_refresh_library_ids_are_trimmed_and_deduped(emby_app, monkeypatch):
+    """手改库里的值（空格/重复/尾逗号）不能让同步多跑一轮或带空 id。"""
+    use_real_build_client(emby_app, monkeypatch)
+    seed_post(emby_app.db, 101, "START-624")
+    set_emby(emby_app.db, emby_app.box, library=" lib1 , lib1 ,lib2, ")
+
+    body = emby_app.post("/api/emby/refresh").json()
+    assert body["libraries"] == 2
+    assert [p.get("ParentId") for _, p, _ in emby_app.http.calls] == [
+        "lib1", "lib2"]
+
+
+def test_refresh_without_library_scans_all(emby_app, monkeypatch):
+    """没选库 = 全部媒体库（不传 ParentId），行为与单选时代一致。"""
+    use_real_build_client(emby_app, monkeypatch)
+    seed_post(emby_app.db, 101, "START-624")
+    set_emby(emby_app.db, emby_app.box)          # 不写 library
+
+    body = emby_app.post("/api/emby/refresh").json()
+    assert body["ok"] is True and body["libraries"] == 1
+    assert "ParentId" not in emby_app.http.calls[0][1]
 
 
 def test_refresh_is_idempotent(emby_app):

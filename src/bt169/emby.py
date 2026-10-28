@@ -16,7 +16,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Iterable, Protocol
 
 from bt169.source.parse import extract_codes
 
@@ -24,9 +24,12 @@ __all__ = [
     "EmbyClient",
     "EmbyError",
     "EmbyNotConfigured",
+    "EmbyScheduler",
     "EmbySyncer",
     "SyncResult",
     "index_items",
+    "parse_library_ids",
+    "LIBRARY_SEP",
     "EMBY_API_BASE",
 ]
 
@@ -107,6 +110,42 @@ def index_items(rows: list[dict[str, Any]]) -> dict[str, str]:
     return idx
 
 
+# ---------------------------------------------------------------- 媒体库多选
+
+
+#: 媒体库 id 的存储分隔符。Emby 的 ItemId 是纯十六进制 GUID（或纯数字），
+#: 都不含逗号，因此逗号分隔不会产生歧义。
+LIBRARY_SEP = ","
+
+
+def parse_library_ids(raw: str | Iterable[str] | None) -> tuple[str, ...]:
+    """把 ``emby.library`` 解析成媒体库 id 元组（E-4 多选）。
+
+    ★ **老配置零迁移**：单选时代存的是裸 id（``"1373"``），多选时代存
+      逗号分隔（``"1373,1380"``）。同一个函数吃两种形状——不含逗号的串
+      ``split`` 出来正是它自己。**不要**为多选另起一个键（``emby.libraries``）：
+      那要走迁移，还得处理「两个键并存时谁优先」，收益为零。
+
+    ★ 去空白、去重、保序：重复的 id 会让同一个库被拉两遍（多一轮翻页
+      往返）；保序则让「全部媒体库」清单的展示顺序稳定。
+
+    Args:
+        raw: 逗号分隔的 id 串、id 序列，或 ``None`` / 空串（= 全部媒体库）。
+    """
+    if raw is None:
+        return ()
+    parts: Iterable[str] = raw.split(LIBRARY_SEP) if isinstance(raw, str) else raw
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        pid = str(part or "").strip()
+        if pid and pid not in seen:
+            seen.add(pid)
+            out.append(pid)
+    return tuple(out)
+
+
 # ---------------------------------------------------------------- 客户端
 
 
@@ -117,7 +156,10 @@ class EmbyClient:
     url: str
     api_key: str
     http: HTTPLike
-    library_id: str | None = None
+    #: 只匹配这些媒体库（``emby.library``）。空 → 全部媒体库。
+    #: 接受裸串（自动按逗号切，见 :func:`parse_library_ids`），
+    #: 方便调用方与测试直接写 ``library_ids="lib42"``。
+    library_ids: str | Iterable[str] | None = None
     timeout: float = 15.0
 
     def __post_init__(self) -> None:
@@ -125,13 +167,43 @@ class EmbyClient:
             raise EmbyNotConfigured("尚未配置 Emby 地址或 API Key")
         self.url = self.url.strip().rstrip("/")
         self.api_key = self.api_key.strip()
-        self.library_id = (self.library_id or "").strip() or None
+        self.library_ids = parse_library_ids(self.library_ids)
+
     def list_items(self) -> list[dict[str, Any]]:
-        """拉取媒体库全部条目（自动翻页）。
+        """拉取所选媒体库的全部条目（逐库翻页，按 ``Id`` 去重）。
+
+        ★ **多库必须逐库拉取**：``/Items`` 的 ``ParentId`` 是**单值**参数。
+          把它当数组传（重复同名 query 参数、或逗号拼成一条）不会报错，
+          只会静默命中其中一个库——另一个库里的片子全部判「未入库」，
+          症状是「明明在库里却没角标」，比报错难查得多。所以按库各发
+          一轮请求再合并，语义明确，也不依赖 ``AncestorIds`` 这类
+          没有文档保证的参数。
 
         Raises:
-            EmbyError: 网络失败、非 200、或响应不是合法 JSON。
+            EmbyError: 任一媒体库拉取失败（网络 / 非 200 / 非 JSON）。
+                宁可整次同步失败（E-7 → 保留旧标记并在面板上显示原因），
+                也不要一份「拉到一半」的索引——半份索引会把另一半库的
+                帖子刷成「未入库」，那是静默的数据损坏。
         """
+        parents: tuple[str | None, ...] = tuple(self.library_ids) or (None,)
+
+        out: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for parent in parents:
+            for row in self._list_parent(parent):
+                item_id = row.get("Id")
+                key = str(item_id) if item_id else ""
+                if key:
+                    if key in seen:
+                        # 防御：同一条目被多个所选库覆盖（合集/多目录）时
+                        # 只留一份，避免同一 item_id 进索引两次。
+                        continue
+                    seen.add(key)
+                out.append(row)
+        return out
+
+    def _list_parent(self, parent: str | None) -> list[dict[str, Any]]:
+        """拉**单个**媒体库的全部条目（自动翻页）。``parent=None`` → 不限库。"""
         out: list[dict[str, Any]] = []
         start = 0
 
@@ -144,8 +216,8 @@ class EmbyClient:
                 "StartIndex": start,
             }
             # E-4：只匹配设置页指定的媒体库
-            if self.library_id:
-                params["ParentId"] = self.library_id
+            if parent:
+                params["ParentId"] = parent
 
             payload = self._get("/Items", params)
             rows = payload.get("Items") or []
@@ -238,7 +310,11 @@ class SyncResult:
 
     checked: int = 0        # 查询过的本地帖数
     in_library: int = 0     # 判定为已入库
-    library_items: int = 0  # Emby 侧条目数
+    library_items: int = 0  # Emby 侧条目数（多库合并、去重后）
+    #: 这次实际扫了几个媒体库（未选库 = 1，即「全部」那一趟）。
+    #: 回给设置面板，让「多选生效了没有」当场可见——配错库的症状是
+    #: 「0 帖命中」，不报错，光看命中数分不清是库配错还是真没入库。
+    libraries: int = 0
     error: str | None = None
 
     @property
@@ -250,6 +326,7 @@ class SyncResult:
             "checked": self.checked,
             "in_library": self.in_library,
             "library_items": self.library_items,
+            "libraries": self.libraries,
             "ok": self.ok,
             "error": self.error,
         }
@@ -287,7 +364,12 @@ class EmbySyncer:
             return SyncResult(error=str(exc))
 
         idx = index_items(rows)
-        result = SyncResult(library_items=len(rows))
+        result = SyncResult(
+            library_items=len(rows),
+            # 空选择 = 不限库，也算「扫了 1 趟」——面板上「1 个媒体库」
+            # 说的是请求轮次而不是用户勾了几个框。
+            libraries=len(self.client.library_ids) or 1,
+        )
 
         # ★ 过滤发生在拉取**之后**：媒体库列表只需要拉一次，过滤的是
         #   本地拿哪些帖子去匹配。only_tids 里的 tid 若已不存在，
@@ -315,8 +397,9 @@ class EmbySyncer:
                 results[i:i + CHUNK], checked_at=checked_at)
 
         log.info(
-            "Emby 同步完成：库内 %s 条，检查 %s 帖，命中 %s",
-            result.library_items, result.checked, result.in_library,
+            "Emby 同步完成：%s 个媒体库共 %s 条，检查 %s 帖，命中 %s",
+            result.libraries, result.library_items, result.checked,
+            result.in_library,
         )
         return result
 

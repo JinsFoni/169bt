@@ -175,11 +175,12 @@ GET https://169bt.com/forum.php?mod=forumdisplay&fid=192&orderby=dateline&page=N
 | E-1 | 按**番号**匹配 Emby 媒体库 | 番号即 `code` 字段（如 `START-624`） |
 | E-2 | 已入库的卡片显示标记 | 图片区**左下角**显示「已入库」（用户指定；绿色 + 背景模糊玻璃拟态） |
 | E-3 | 未入库**不显示**任何标记 | 只标「有」，不标「无」，避免视觉噪声 |
-| E-4 | 匹配范围 | 设置页所指定的**媒体库**内条目（见 4.5） |
+| E-4 | 匹配范围 | 设置页所指定的**媒体库**内条目（**可多选**，见 E-9 / 4.5） |
 | E-5 | 匹配要防误判 | 番号需**边界**匹配，避免 `START-62` 命中 `START-624` |
 | E-6 | 缓存 + 定期核对 | 建议 10–30 分钟一次或手动刷新，**不可**每张卡片实时查库；另加「采集任务收尾后对本次采到的帖子立即核对一次」（手动 + RSS 两条路径）。定时节奏可由 **`emby.cron`** 表达式覆盖（设置页 Emby 分区，落库前校验，改后无需重启）；空 = 默认 15 分钟 |
 | E-7 | 失败降级 | Emby 不可达时**不显示标记、不报错、不阻塞浏览** |
-| E-8 | 媒体库列表**按用户过滤** | 设置页填了用户名 → 下拉框只列该用户能访问的库；找不到该用户 → 退回全部库并提示。**非安全边界**，只是「帮你少看几个库」 |
+| E-8 | 媒体库列表**按用户过滤** | 设置页填了用户名 → 勾选列表只列该用户能访问的库；找不到该用户 → 退回全部库并提示。**非安全边界**，只是「帮你少看几个库」 |
+| E-9 | 媒体库**多选** | 设置页「媒体库」是勾选列表：可只匹配一个库，也可同时匹配多个库。**多选语义为并集**——任一所选库里有该番号即算「已入库」；一个都不勾 = 全部媒体库。同步时**逐库拉取再合并**（`ParentId` 是单值参数，不能塞多值） |
 
 ### 4.4 Telegram 转发（下载）
 
@@ -205,7 +206,7 @@ GET https://169bt.com/forum.php?mod=forumdisplay&fid=192&orderby=dateline&page=N
 | S-5 | **每个分区各有独立保存按钮** | 各自保存、各自反馈 |
 | S-6 | 基础设置 | 访问密码（**后端校验**：PBKDF2 哈希 + 会话 token）✅ |
 | S-7 | 网络代理 | 类型（HTTP/HTTPS/SOCKS5）/ 地址 / 端口 / 用户名 / 密码 |
-| S-8 | Emby | 服务器地址、API Key、用户、媒体库（媒体库列表按「用户」过滤，见 E-8） |
+| S-8 | Emby | 服务器地址、API Key、用户、媒体库**多选**勾选列表（列表按「用户」过滤，见 E-8；多选语义见 E-9） |
 | S-9 | Telegram | Bot Token、Chat ID |
 | S-10 | **站点** | RSS 订阅链接 / 用户名 / 密码（对应 W-17） |
 
@@ -332,8 +333,8 @@ GROUP BY post_date ORDER BY post_date DESC;
 | POST | `/api/posts/{tid}/forward` | 把该帖 ed2k 转发到已配置的 TG Bot |
 | POST | `/api/archive/forward?date=…` | 批量转发该日全部 ed2k |
 | GET | `/api/emby/status` | 批量查询入库状态（按番号匹配），返回 `{tid: bool}` |
-| POST | `/api/emby/refresh` | 手动触发一次 Emby 媒体库核对 |
-| GET | `/api/emby/libraries` | Emby 媒体库列表（供设置页下拉）。按 `emby.username` 过滤，返回 `source`(`user`/`all`) / `filtered_by` / `warning` |
+| POST | `/api/emby/refresh` | 手动触发一次 Emby 媒体库核对（多选时逐库拉取；返回 `libraries` = 扫描轮次） |
+| GET | `/api/emby/libraries` | Emby 媒体库列表（供设置页**多选**勾选）。按 `emby.username` 过滤，返回 `source`(`user`/`all`) / `filtered_by` / `warning` |
 | GET | `/api/settings` | 读取配置（密钥脱敏） |
 | PUT | `/api/settings` | 保存配置（按分区提交） |
 | POST | `/api/settings/test/emby` | 测试 Emby 连通性 |
@@ -375,7 +376,7 @@ GROUP BY post_date ORDER BY post_date DESC;
 8. **ed2k 可用性**：这些链接标注「限 115 网盘会员使用」，确认你已有 115 会员？
 9. **TG「转发」语义**：建议 `sendMessage`（Bot 自己发一条）——确认？
 10. **批量转发粒度**：建议逐帖一条（`per_post`）——确认？
-11. **Emby 匹配范围**：建议设置页指定的单个媒体库——确认？
+11. ~~**Emby 匹配范围**~~：**已定** — 设置页媒体库**可多选**（E-9），任一选中库命中即算已入库。
 12. ~~设置项持久化~~：**已定** — 后端 SQLite；密钥 AES-256-GCM；密码回显占位符。
 13. ~~访问密码作用范围~~：**已定** — 后端校验（前端门禁不是安全边界）。
 
@@ -506,7 +507,7 @@ ed2k      : ed2k://|file|s169bbs.com@START-624_[4K].mkv|7515146184|0B17E95CBBA18
 | C-10 手动采集 | ✅ | 顶栏 `#collectBtn` + 日期范围弹窗 + 进度轮询 |
 | C-1 定时轮询 RSS | ✅ | `RssPoller`（`collector/__init__.py`）+ `_build_poll_loop`（每 5 分钟，`delay_first`）；只发现（ed2k 必须逐帖抓详情）；与手动采集**共用同一把采集锁**；`POST /api/collect/poll` 手动触发 |
 | W-15 图片本地化（后端） | ✅ | `collector/imagecache.py`；600px/1200px WebP；`/img` 静态分发带 immutable 缓存；删除联动引用计数 |
-| E-1~E-7 Emby 入库标记 | ✅ | `emby.py`（客户端 + 索引 + 同步器 + 定时器）；卡片图片区右上角「已入库」；浏览路径只读 DB；Emby 不可达时静默降级 |
+| E-1~E-9 Emby 入库标记 | ✅ | `emby.py`（客户端 + 索引 + 同步器 + 定时器）；卡片图片区右上角「已入库」；浏览路径只读 DB；Emby 不可达时静默降级 |
 | T-1~T-8 TG 转发 | ✅ | 传输层 `mtpproto.py`（Telethon 用户账号，方案 A）+ 业务层 `telegram.py`；消息只含 ed2k 链接（无头部信息）；批量串行 + 间隔 3 秒；FloodWait → 429 停手；`tg_sent_at` 幂等；CLI `bt169 tg-login` 登录；设置页测试按钮双通道报告（MTProto + Bot） |
 | S-1~S-10 设置模块 | ✅ | `settings.js` + `.settings` 弹窗；**已接后端**读写 |
 
@@ -549,7 +550,7 @@ ed2k      : ed2k://|file|s169bbs.com@START-624_[4K].mkv|7515146184|0B17E95CBBA18
 | 旧缺口 | 现状 |
 |---|---|
 | 采集需登录会话 | ✅ 已真实登录并采集，13 帖全 `done` |
-| Emby 媒体库下拉 | ✅ `GET /api/emby/libraries`，从 Emby 拉真实库列表 |
+| Emby 媒体库**多选** | ✅ `GET /api/emby/libraries` 拉真实库列表 → 设置页勾选列表；`emby.library` 存逗号串（旧单选值直接兼容）；同步逐库拉取合并（E-9） |
 | 媒体库按用户过滤（E-8） | ✅ 填了用户名 → 走 `/Users/{id}/Views`（实测 muse 11 库 / xy 8 / ym 8）；找不到 → 退回全部库 + 警示提示行 |
 | 无「测试连接」 | ✅ 设置页 TG「发送测试消息」、Emby「刷新入库状态」 |
 | 顶栏「下载本日」 | ✅ 已绑定 `POST /api/archive/forward`（P6） |

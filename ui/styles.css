@@ -1158,6 +1158,99 @@ select.input {
 .input-wrap { position: relative; }
 .input-wrap .input { padding-right: 40px; }
 
+/* ---------------- 媒体库多选（Emby，E-9） ----------------
+   勾选列表而不是 <select multiple>：原生多选要按住 Ctrl/Cmd 点，
+   触摸板上几乎不可用，而且「已勾了哪几个」在收起状态看不见。 */
+
+.libpick {
+  min-height: 38px;
+  max-height: 172px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-btn);
+  background: var(--ink-900);          /* 与 .input 同一层凹陷感 */
+  transition: border-color .16s var(--ease), box-shadow .16s var(--ease);
+}
+.libpick:hover { border-color: var(--line-strong); }
+/* 焦点进入任一行即整块高亮：键盘 Tab 进来时看得出「这块是焦点区」 */
+.libpick:focus-within {
+  border-color: rgba(69,147,255,.6);
+  box-shadow: 0 0 0 3px rgba(69,147,255,.14);
+}
+
+.libpick-empty {
+  margin: 0;
+  padding: 9px 10px;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.libitem {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+  transition: background .14s var(--ease), color .14s var(--ease);
+}
+.libitem:hover { background: var(--glass-hi); }
+.libitem.is-on { color: var(--text); }
+
+/* 自绘勾选框，不用系统默认外观：
+   深底上 Chrome 的未选中框是纯白实心块，远看像「已勾上」——
+   在「勾几个库」这类必须一眼看清的场合是致命的。 */
+.libitem input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  position: relative;
+  flex: 0 0 auto;
+  width: 15px; height: 15px;
+  margin: 0;
+  border: 1.5px solid var(--line-strong);
+  border-radius: 4px;
+  background: var(--ink-800);
+  cursor: pointer;
+  transition: background .14s var(--ease), border-color .14s var(--ease);
+}
+.libitem input[type="checkbox"]:hover { border-color: var(--accent-soft); }
+/* 勾：右上角向下的两笔（border 画的对勾，不用图标资源） */
+.libitem input[type="checkbox"]:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.libitem input[type="checkbox"]:checked::after {
+  content: "";
+  position: absolute;
+  left: 4px; top: 1px;
+  width: 4px; height: 8px;
+  border: solid var(--ink-900);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+/* 键盘 Tab 进来必须有可见焦点（整块 .libpick 也有 focus-within 描边） */
+.libitem input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--accent-soft);
+  outline-offset: 1px;
+}
+
+/* 库名可能很长（「电影/4K 原盘/2024」）：省略号而不是把行撑成两行 */
+.libitem-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.libitem-flag {
+  margin-left: auto;
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
 .reveal {
   position: absolute;
   right: 5px;

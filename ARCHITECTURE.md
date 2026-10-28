@@ -796,7 +796,8 @@ backoff = min(base * 2 ** retry_count, 3600) * random.uniform(0.8, 1.2)
 ```
 Emby Syncer (定时器：emby.cron 或默认 15 分钟；或采集任务收尾时立即触发)
     │
-    ├─ 拉取媒体库全部条目（IncludeItemTypes=Movie，只要 Name/Path/Id）
+    ├─ **逐库**拉取所选媒体库条目（IncludeItemTypes=Movie，只要 Name/Path/Id）
+    │     多选 = 每个库各一轮翻页，合并后按 Id 去重（E-9）
     ├─ 从条目名中提取番号 → 建索引 {code: item_id}
     ├─ 批量匹配本地 posts.code（采集路径只匹配本次采到的 tid）
     └─ 写回 posts.emby_status / emby_item_id / emby_checked
@@ -834,7 +835,7 @@ Emby Syncer (定时器：emby.cron 或默认 15 分钟；或采集任务收尾�
 
 #### 5.4.0 媒体库列表按用户过滤（E-8）
 
-设置页的「媒体库」下拉从两个不同端点取数，**id 字段名不一样**：
+设置页的「媒体库」**勾选列表**从两个不同端点取数，**id 字段名不一样**：
 
 | 场景 | 端点 | id 字段 | 实测结果 |
 |---|---|---|---|
@@ -859,7 +860,40 @@ Emby Syncer (定时器：emby.cron 或默认 15 分钟；或采集任务收尾�
 
 ★ **用户名匹配大小写敏感、精确**（ADR-20）。
 
-#### 5.4.1 番号匹配（`matcher.py`）—— E-5 防误判
+#### 5.4.1 媒体库多选（E-9）
+
+设置页的「媒体库」是**勾选列表**（不是下拉、也不是 `<select multiple>`：
+原生多选要按住 Ctrl/Cmd 点，触摸板上几乎不可用，且收起状态看不出勾了几个）。
+
+**存储与解析**：
+
+| 项 | 值 |
+|---|---|
+| 存储键 | `emby.library`（**沿用**，不新增键——ADR-24） |
+| 单选时代 | `"1373"` |
+| 多选 | `"1373,1380"`（逗号分隔） |
+| 空值 | 全部媒体库（请求不带 `ParentId`） |
+| 解析 | `emby.parse_library_ids()`：吃裸串 / CSV / 序列，去空白、去重、保序（ADR-24） |
+
+**逐库拉取、合并去重**（ADR-25）：
+
+```
+library_ids = ("1373", "1380")
+  ├─ GET /Items?ParentId=1373 …（翻页到 TotalRecordCount）
+  ├─ GET /Items?ParentId=1380 …（翻页到 TotalRecordCount）
+  └─ 合并 → 按 Id 去重 → index_items() → 匹配 → 写回
+```
+
+- **不能**把多个 id 塞进同一个 `ParentId`（逗号串或重复同名参数）：
+  不报错，只静默命中其中一个库 → 另一个库的片子全判「未入库」。
+- **任一库拉取失败 = 整次同步失败**（E-7 语义）：保留上次标记并在面板显示
+  原因。半份索引会把另一半库的帖子刷成「未入库」，那是静默的数据损坏。
+- 多选语义是**并集**：任一所选库里有这个番号，卡片就显示「已入库」
+  （`emby_item_id` 记先命中的那个库的条目 id）。
+- `SyncResult.libraries` = 实际扫了几轮（未选库算 1），回给面板——库里
+  0 命中时分不清「库选错了」还是「真没入库」，把轮次摆出来一眼可见。
+
+#### 5.4.2 番号匹配（`matcher.py`）—— E-5 防误判
 
 **朴素 `in` 判断是错的**：`START-62` 会命中 `START-624`。本机实测复现：
 
@@ -1101,11 +1135,11 @@ AvdbClient（HTTP 层）    POST /api/v1/users/login（表单编码）→ access
 |---|---|
 | `/articles/search` **只认 Bearer JWT** | `X-API-Key` / `?api_key=` / `?access_token=` 全部 401（`{"detail":"Not authenticated"}` / `{"detail":"Token 无效"}`）。所以必须用用户名密码换 JWT |
 | JWT **没有 `exp`** | 无法预判过期 → 只在收到 401 时重登一次再重试（且只重试一次，避免把登录玩成暴力破解）。令牌加密存 `ltx.jwt` |
-| 图床直连返回**加密字节** | `tp.spfcas.com` 对直连返回 159 500 B `binary/octet-stream`（无 JPEG magic，PIL 报 "cannot identify image file"）。同一 URL 经 `/api/v1/img-proxy/?url=…` 拿回才是正常 JPEG。见 ADR-20 |
+| 图床直连返回**加密字节** | `tp.spfcas.com` 对直连返回 159 500 B `binary/octet-stream`（无 JPEG magic，PIL 报 "cannot identify image file"）。同一 URL 经 `/api/v1/img-proxy/?url=…` 拿回才是正常 JPEG。见 ADR-23 |
 | `preview_images` 有**三种形状** | 单 URL / **逗号分隔的一串** / 数组。必须按逗号切（AVdb 前端也是 `split(",")`），否则整串当 URL 去请求 → 405 / 破图 |
 | 一次全量 = 7 页 / 658 条 / **约 3.6 秒** | 同步是「秒级」，可以直接同步执行，不需要像采集那样上后台线程 |
 
-**为什么落本地镜像而不是每次实时查**（ADR-19）：日期分组与计数、`tg_sent_at`
+**为什么落本地镜像而不是每次实时查**（ADR-22）：日期分组与计数、`tg_sent_at`
 （已下载标记）、AVdb 掉线时的可浏览性——三件事都要求本地有行。
 
 **封面按需本地化**：列表接口**不**逐张下载图片（658 条全预下载是几百 MB，
@@ -1168,7 +1202,7 @@ APScheduler (5min)
 ```
 APScheduler (15min) 或 POST /api/emby/refresh
   │
-  ├─▶ emby.list_items(library_id)      ← 只拉 Name/Path/Id
+  ├─▶ emby.list_items(library_ids)     ← 逐库拉，只取 Name/Path/Id（E-9）
   │     └─ 失败？→ 记日志，保持上次 emby_status，**不报错**（E-7）
   │
   ├─▶ matcher.build_index(items)       ← extract_codes + normalize
@@ -1225,8 +1259,8 @@ APScheduler (15min) 或 POST /api/emby/refresh
 | POST | `/api/posts/{tid}/forward` | — | `{ok, message_id}` | W-13 T-1 |
 | POST | `/api/archive/forward` | `?date=` | `{sent, skipped, failed}` | T-2 |
 | GET | `/api/emby/status` | `?date=` | `{tid: bool}` | E-2 |
-| POST | `/api/emby/refresh` | — | `202` | E-6 |
-| GET | `/api/emby/libraries` | — | `[{id, name}]` | S-8 |
+| POST | `/api/emby/refresh` | — | `200 {ok,checked,in_library,library_items,libraries,error}` | E-6 / E-9 |
+| GET | `/api/emby/libraries` | — | `{ok, libraries:[{id,name}], source, filtered_by, warning}` | S-8 |
 | GET | `/api/settings` | — | 密钥**脱敏** | S-1~S-9 |
 | PUT | `/api/settings` | `{section, values}` | `200` | S-5 |
 | POST | `/api/settings/test/emby` | — | `{ok, detail}` | — |
@@ -1400,10 +1434,14 @@ log.error("emby.sync.failed", exc_info=True)     # 但不影响浏览
 | ADR-19 | **媒体库列表按用户过滤（E-8），且**不是**安全边界** | 用户拍板：填了 `emby.username` 就走 `/Users/{id}/Views`，只列该用户能访问的库 | `/Library/VirtualFolders`（管理员视角）：实测给 22 个库，其中大半是别的用户的 |
 | ADR-20 | **用户名匹配大小写敏感、精确** | 用户明确要求；`Muse` ≠ `muse`，不静默匹配到别人 | 大小写不敏感：会让用户以为配对了，实际在用别人的权限 |
 | ADR-21 | **找不到用户时退回全部库 + 警示提示，而非报错** | 过滤只是「帮你少看几个库」；报错会让设置页整个用不了，且用户只是想先看看有哪些库 | 报错/空列表：用户无法自救，也看不到可选项 |
+| ADR-22 | **LTX 用独立镜像表 `ltx_items`，不并进 `posts`** | 语义（归档 vs 上游列表）、写入模式（增量 vs 整表覆盖）、失败隔离三者都不同，见下方小节 | 复用 `posts` + `source` 列：`status`/`retry_count` 等列全部说谎，且整表同步会误伤真实归档 |
+| ADR-23 | **LTX 封面经 AVdb 的 `img-proxy` 取，不直连图床** | 图床对直连返回加密字节（热链保护）；顺带把出网交给 AVdb | 直连图床：拿不到图（PIL 无法识别），且本机得为图床配代理 |
+| ADR-24 | **媒体库多选存逗号串（`emby.library`），不新增键、不迁移** | 单选时代的裸 id 与多选的 `"a,b"` 被同一个 `parse_library_ids` 吃掉；省掉迁移与「两个键谁优先」的判定 | 新增 `emby.libraries`：要迁移，还得定义并存时的优先级，收益为零 |
+| ADR-25 | **多库**逐库**拉取再合并，不传多值 `ParentId`** | `/Items` 的 `ParentId` 是单值参数，传多值不报错、只静默命中一个库（「明明在库里却没角标」） | 逗号拼一条 / 重复同名参数 / `AncestorIds`：前两者静默错，后者无文档保证 |
 
 ---
 
-### ADR-19：LTX 用独立镜像表，不并进 `posts`
+### ADR-22：LTX 用独立镜像表，不并进 `posts`
 
 **背景**：第二个 ed2k 来源（AVdb 的 LTX破解 板块）字段与 4K 帖子高度重叠，
 最省事的做法是把行插进 `posts` 加一列 `source`。
@@ -1427,7 +1465,7 @@ log.error("emby.sync.failed", exc_info=True)     # 但不影响浏览
 **代价**：两套仓储/路由有相似代码；已用「DTO 字段名严格一致 + 前端按
 `source` 只切端点」把重复压到最小。
 
-### ADR-20：LTX 封面必须经 AVdb 的图床代理
+### ADR-23：LTX 封面必须经 AVdb 的图床代理
 
 **背景**：`ltx_items.cover_url` 指向图床（`tp.spfcas.com` / `awsimgsrc.dmm.com`）。
 
@@ -1454,7 +1492,7 @@ log.error("emby.sync.failed", exc_info=True)     # 但不影响浏览
 |---|---|---|
 | 1 | **TG 语义**：确认用 `sendMessage`？批量用 `per_post` 还是 `single`？ | `sendMessage` + `per_post`（ADR-10，§5.5.2） |
 | 2 | **采集频率**：5 分钟 / 10 分钟？ | **5 分钟**（20 条窗口，峰值 41 帖/天，余量充足） |
-| 3 | **Emby 匹配范围**：指定媒体库还是全库？ | 设置页指定的**单个**媒体库（E-4） |
+| 3 | **Emby 匹配范围**：指定媒体库还是全库？ | ~~单个媒体库~~ → 已定：设置页**可多选**，任一命中即算已入库（E-4 / E-9） |
 | 4 | **部署形态**：本机 `127.0.0.1` 还是服务器？是否需要 HTTPS？ | 先本机；若要外网访问**必须**加 HTTPS |
 
 另有三项**非阻塞**但需知晓：

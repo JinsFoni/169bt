@@ -352,7 +352,7 @@
           <div class="pane-scroll">
             <div class="pane-head">
               <h3 class="pane-title">Emby</h3>
-              <p class="pane-desc">采集完成后刷新指定媒体库。</p>
+              <p class="pane-desc">采集完成后刷新指定的媒体库，可多选。</p>
             </div>
 
             <div class="field">
@@ -371,21 +371,22 @@
               <p class="field-hint">Emby 后台 → 高级 → API 密钥。</p>
             </div>
 
-            <div class="field-row">
-              <div class="field field-grow">
-                <label class="field-label" for="embyUser">用户</label>
-                <input class="input" id="embyUser" type="text" placeholder="—" autocomplete="off" spellcheck="false">
+            <div class="field">
+              <label class="field-label" for="embyUser">用户</label>
+              <input class="input" id="embyUser" type="text" placeholder="—" autocomplete="off" spellcheck="false">
+            </div>
+
+            <!-- 媒体库多选（E-9）：勾选列表，不用 <select multiple>——
+                 原生多选靠 Ctrl/Cmd 点选，触摸板上几乎不可用。
+                 真正的值是这个隐藏 input（逗号分隔），它挂在 settings.js
+                 的 FIELDS 表里，fill()/collect() 不必改。 -->
+            <div class="field">
+              <span class="field-label" id="embyLibLabel">媒体库 <span class="field-opt">可多选</span></span>
+              <input type="hidden" id="embyLib" value="">
+              <div class="libpick" id="embyLibList" role="group" aria-labelledby="embyLibLabel">
+                <p class="libpick-empty">保存地址与 API Key 后加载</p>
               </div>
-              <div class="field field-grow">
-                <label class="field-label" for="embyLib">媒体库</label>
-                <div class="select-wrap">
-                  <select class="input" id="embyLib">
-                    <option value="">保存后加载</option>
-                  </select>
-                  <svg class="select-caret" viewBox="0 0 20 20" aria-hidden="true"><path d="M6 8l4 4 4-4"/></svg>
-                </div>
-                <p class="field-hint" id="embyLibHint">留空 = 全部媒体库。</p>
-              </div>
+              <p class="field-hint" id="embyLibHint">不勾选 = 全部媒体库。</p>
             </div>
 
             <div class="field">

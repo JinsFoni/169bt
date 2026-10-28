@@ -17,6 +17,7 @@ from bt169.emby import (
     EmbySyncer,
     SyncResult,
     index_items,
+    parse_library_ids,
 )
 from bt169.repo.posts import PostRepo, now_iso
 
@@ -153,10 +154,107 @@ def test_client_uses_library_parent_when_given():
     """E-4：只匹配设置页指定的媒体库。"""
     http = FakeHTTP(body=items(("e1", "START-624")))
     c = EmbyClient(url="http://e", api_key="k", http=http,
-                   library_id="lib42")
+                   library_ids="lib42")
     c.list_items()
     _, params, _ = http.calls[0]
     assert params["ParentId"] == "lib42"
+
+
+# ------------------------------------------------ 媒体库多选（E-9）
+
+
+def test_parse_library_ids_shapes():
+    """★ 单选时代的裸 id 与多选的逗号串**同一个解析器**（无需迁移）。"""
+    assert parse_library_ids("lib42") == ("lib42",)
+    assert parse_library_ids("a,b") == ("a", "b")
+    assert parse_library_ids(["a", " b "]) == ("a", "b")
+
+
+def test_parse_library_ids_drops_blanks_and_dupes():
+    """空段与重复不能变成「多拉一遍库」——重复 id 就是多一轮翻页往返。"""
+    assert parse_library_ids(" a ,, a , ") == ("a",)
+    assert parse_library_ids(",,,") == ()
+
+
+def test_parse_library_ids_empty_means_all():
+    """空 = 全部媒体库（不传 ParentId）。"""
+    assert parse_library_ids(None) == ()
+    assert parse_library_ids("") == ()
+    assert parse_library_ids("   ") == ()
+
+
+def test_client_queries_each_library():
+    """E-9：多选媒体库 → **逐库各拉一轮**再合并。
+
+    ★ 绝不能把多个 id 塞进同一个 ParentId：``/Items`` 的 ParentId 是
+      单值参数，塞多个不会报错，只会静默命中其中一个库——另一个库的
+      片子全部判「未入库」。
+    """
+    http = FakeHTTP(body=items(("e1", "START-624"),
+                               ("e2", "MIDA-737")))
+    c = EmbyClient(url="http://e", api_key="k", http=http,
+                   library_ids="lib1,lib2")
+    rows = c.list_items()
+
+    assert [p.get("ParentId") for _, p, _ in http.calls] == ["lib1", "lib2"]
+    # 两个库各返回同样两条（同一个假响应）→ 必须按 Id 去重
+    assert [r["Id"] for r in rows] == ["e1", "e2"]
+
+
+def test_client_multilibrary_matches_union(db):
+    """多选库的语义是**并集**：任一所选库里有这个番号就算已入库。"""
+    from bt169.repo.posts import PostRepo
+
+    seed(db, 101, "START-624")
+    seed(db, 102, "MIDA-737")
+
+    pages = {
+        "lib1": items(("e1", "START-624")),
+        "lib2": items(("e2", "MIDA-737")),
+    }
+
+    class TwoLibHTTP:
+        def __init__(self):
+            self.calls = []
+
+        def get(self, url, *, params=None, headers=None, timeout=None):
+            parent = (params or {}).get("ParentId")
+            self.calls.append(parent)
+
+            class R:
+                pass
+
+            r = R()
+            r.status_code = 200
+            r.text = pages[parent]
+            return r
+
+    http = TwoLibHTTP()
+    client = EmbyClient(url="http://e", api_key="k", http=http,
+                        library_ids="lib1,lib2")
+    result = EmbySyncer(client=client, posts_repo=PostRepo(db)).sync()
+
+    assert http.calls == ["lib1", "lib2"]
+    assert result.ok and result.libraries == 2
+    assert result.checked == 2 and result.in_library == 2
+    pr = PostRepo(db)
+    assert pr.get(101).emby_status == "in_library"
+    assert pr.get(102).emby_status == "in_library"
+
+
+def test_sync_reports_libraries_scanned(db):
+    """空选择 = 不限库，也算扫了 1 趟（面板上「N 个库」是请求轮次）。"""
+    seed(db, 101, "START-624")
+    r = syncer(db, FakeHTTP(body=items(("e1", "START-624")))).sync()
+    assert r.libraries == 1
+
+
+def test_client_multilibrary_dedupes_items_across_libs():
+    """同一条目被两个所选库覆盖（合集/多目录）时只留一份。"""
+    http = FakeHTTP(body=items(("e1", "START-624")))
+    rows = EmbyClient(url="http://e", api_key="k", http=http,
+                      library_ids="lib1,lib2").list_items()
+    assert len(rows) == 1
 
 
 def test_client_no_parent_without_library():
@@ -355,7 +453,8 @@ def test_sync_empty_library_marks_all_none(db):
 
 def test_sync_result_to_dict():
     assert SyncResult(checked=3, in_library=2).to_dict() == {
-        "checked": 3, "in_library": 2, "library_items": 0, "ok": True,
+        "checked": 3, "in_library": 2, "library_items": 0,
+        "libraries": 0, "ok": True,
         "error": None,
     }
 

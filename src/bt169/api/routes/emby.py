@@ -23,6 +23,7 @@ from bt169.emby import (
     EmbyNotConfigured,
     EmbySyncer,
     default_http,
+    parse_library_ids,
 )
 from bt169.repo.posts import PostRepo
 from bt169.repo.settings import SettingsRepo
@@ -61,9 +62,11 @@ def build_client(settings: SettingsRepo) -> EmbyClient:
     """
     url = settings.get(config.section_key("emby", "url")) or ""
     key = settings.get(config.section_key("emby", "api_key")) or ""
+    # ★ 媒体库支持多选：存储值形如 ``"1373,1380"``（单选时代是裸 id，
+    #   同一个解析器吃两种形状，旧配置不需要迁移）。
     library = settings.get(config.section_key("emby", "library")) or ""
     return EmbyClient(url=url, api_key=key, http=default_http(),
-                      library_id=library or None)
+                      library_ids=parse_library_ids(library))
 
 
 class SyncResponse(BaseModel):
@@ -71,6 +74,7 @@ class SyncResponse(BaseModel):
     checked: int = 0
     in_library: int = 0
     library_items: int = 0
+    libraries: int = 0
     error: str | None = None
 
 
@@ -94,8 +98,9 @@ def refresh(
             return SyncResponse(ok=False, error=str(exc))
 
         result = EmbySyncer(client=client, posts_repo=posts).sync()
-        log.info("手动刷新：库内 %s 条，检查 %s 帖，命中 %s%s",
-                 result.library_items, result.checked, result.in_library,
+        log.info("手动刷新：%s 个媒体库共 %s 条，检查 %s 帖，命中 %s%s",
+                 result.libraries, result.library_items, result.checked,
+                 result.in_library,
                  f"，错误：{result.error}" if result.error else "")
         return SyncResponse(**result.to_dict())
     finally:
@@ -106,7 +111,7 @@ def refresh(
 def libraries(
     settings: SettingsRepo = Depends(get_settings),
 ) -> dict[str, Any]:
-    """列出可选媒体库（S-8），供设置页下拉框使用。
+    """列出可选媒体库（S-8），供设置页**多选**勾选列表使用。
 
     ★ 失败返回 ``{ok:false, error, libraries:[]}`` 而非 5xx——
     设置面板要显示「连不上」而不是弹一个通用错误。
