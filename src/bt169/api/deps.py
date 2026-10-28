@@ -11,10 +11,14 @@ from fastapi import Request
 from bt169.collector.imagecache import ImageCache
 from bt169.db import Database
 from bt169.repo.archive import ArchiveRepo
+from bt169.repo.ltx import LtxRepo
 from bt169.repo.posts import PostRepo
 from bt169.repo.settings import SettingsRepo
 
-__all__ = ["get_db", "get_posts", "get_archive", "get_settings", "get_images"]
+__all__ = [
+    "get_db", "get_posts", "get_archive", "get_settings", "get_images",
+    "get_ltx",
+]
 
 
 def get_db(request: Request) -> Database:
@@ -31,6 +35,11 @@ def get_archive(request: Request) -> ArchiveRepo:
 
 def get_settings(request: Request) -> SettingsRepo:
     return SettingsRepo(request.app.state.db, request.app.state.box)
+
+
+def get_ltx(request: Request) -> LtxRepo:
+    """LTX 镜像表（第二个 ed2k 数据源）。"""
+    return LtxRepo(request.app.state.db)
 
 
 def get_images(request: Request) -> ImageCache | None:

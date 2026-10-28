@@ -1,7 +1,8 @@
 # 169bt 归档台
 
 个人自用的 4K 帖归档与 ED2K 提取工具。后端 Python + FastAPI + SQLite，
-前端零构建原生 ESM。
+前端零构建原生 ESM。两个 ed2k 数据源：169bt 论坛采集（4K）+ 自建 AVdb 的
+「LTX破解」板块（LTX）。
 
 [![Release](https://img.shields.io/github/v/release/JinsFoni/169bt)](https://github.com/JinsFoni/169bt/releases)
 [![Docker Image](https://img.shields.io/badge/ghcr.io-jinsfoni%2F169bt-blue)](https://github.com/JinsFoni/169bt/pkgs/container/169bt)
@@ -33,6 +34,21 @@ python3 -m venv .venv
 > `bt169 login` 会在提交前检查额度（剩余 ≤1 或距上次提交 <600 秒则
 > 拒绝），且只在验证码**预校验通过**后才提交——实测提交错误验证码
 > **不消耗**额度。
+
+### 数据源：4K 与 LTX
+
+顶栏品牌名右侧可在两个 ed2k 来源之间切换（选择记在浏览器里）：
+
+| 标签 | 来源 | 怎么来 |
+|---|---|---|
+| **4K** | 169bt 论坛（`fid=192`） | RSS 发现 + 详情页采集，图片本地化，Emby 匹配 |
+| **LTX** | 自建 [AVdb](https://github.com/li-peifeng/AVdb-Only) 实例的「LTX破解」板块 | 设置页填 AVdb 地址 + 账号 → 全量同步到本地镜像（658 条 / 约 4 秒） |
+
+两者卡片、复制、转发到 Telegram 的行为完全一致；LTX 是**镜像**，所以没有
+删除按钮（上游才是权威），封面经 AVdb 的图床代理按需本地化。
+
+> LTX 打开时会按 600 秒 TTL **自动同步**一次；也可在设置 →「LTX 数据源」
+> 手动点「立即同步」。AVdb 掉线时已同步的内容照常可翻。
 
 ### 访问门禁（S-6）
 

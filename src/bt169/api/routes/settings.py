@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -87,6 +88,22 @@ def write_settings(
                     status_code=400,
                     detail={"code": "bad_rss_url", "message": str(exc)},
                 ) from exc
+        # ★ LTX 数据源地址：必须是完整的 http(s) URL，并去掉尾部斜杠。
+        #   与 rss_url 同理——填错了到「同步」时才炸，用户看不到原因。
+        #   尾部斜杠不归一的话 ``f"{base}/api/..."`` 会拼出 ``//api``，
+        #   部分反代会 404。
+        if patch.section == "ltx" and key == "base_url" and value:
+            raw = value.strip()
+            parsed = urlparse(raw)
+            if parsed.scheme not in ("http", "https") or not parsed.netloc:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "code": "bad_ltx_url",
+                        "message": f"AVdb 地址必须是完整的 http(s) URL：{value!r}",
+                    },
+                )
+            value = raw.rstrip("/")
         # ★ cron 表达式必须在**落库前**校验：定时器在后台线程里跑，
         #   非法表达式到那时才炸的话，用户已经看不到保存报错了。
         #   校验后归一（多余空格折叠）——避免同一表达式出现多种写法。

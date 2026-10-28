@@ -178,9 +178,11 @@ Python 的 `ddddocr` 有 14.7k star、5 年历史，且**需求文档 §6 原本
 │   ├── db.py                    # 连接、WAL、迁移、单写连接
 │   ├── migrations/*.sql
 │   ├── models.py                # 领域对象 + DTO
+│   ├── avdb.py                  # ★ LTX 数据源：AVdb 登录/检索/图床代理（§5.9）
 │   ├── repo/
 │   │   ├── posts.py             # 帖子仓储
 │   │   ├── archive.py           # 归档日期 / 相邻导航
+│   │   ├── ltx.py               # ★ LTX 镜像表仓储
 │   │   └── settings.py          # KV 配置仓储
 │   ├── source/                  # ★ 169bt 论坛抓取（最复杂、最有风险的模块）
 │   │   ├── base.py              # Source 协议
@@ -207,6 +209,7 @@ Python 的 `ddddocr` 有 14.7k star、5 年历史，且**需求文档 §6 原本
 │   │   └── routes/
 │   │       ├── auth.py          # /api/auth/{login,logout,me}（S-6）
 │   │       ├── posts.py         # 帖子 / 归档（含硬删除）
+│   │       ├── ltx.py           # ★ /api/ltx/*：同步、日期、帖子、封面、转发
 │   │       ├── images.py        # /img/* 分发（immutable）
 │   │       ├── status.py        # /api/status（会话/采集器状态）
 │   │       ├── forward.py       # TG 转发
@@ -296,6 +299,26 @@ CREATE TABLE panel_session (
   created_at TEXT NOT NULL,
   expires_at TEXT NOT NULL
 );
+
+-- LTX 数据源（第二个 ed2k 来源：AVdb 的「LTX破解」板块）。
+-- ★ 是 posts 的**镜像**，不是 posts 的一部分：主键与来源都不同，
+--   合并进 posts 会污染「归档」语义（posts = 我采集过的帖子）。
+CREATE TABLE ltx_items (
+  id           INTEGER PRIMARY KEY,   -- AVdb 的 tid（16 位合成 ID）
+  number       TEXT,                  -- 番号
+  title        TEXT    NOT NULL,
+  section      TEXT,                  -- 'LTX破解'
+  publish_date TEXT    NOT NULL,      -- 归组依据 (YYYY-MM-DD)
+  size_bytes   INTEGER,
+  ed2k         TEXT,
+  cover_url    TEXT,                  -- 源图床 URL（直连返回加密字节，见 §5.9）
+  detail_url   TEXT,
+  rejected     INTEGER NOT NULL DEFAULT 0,  -- AVdb 标记的「不合格资源」
+  created_at   TEXT,                  -- 源站 create_time（页内排序）
+  tg_sent_at   TEXT,                  -- NULL = 未转发（★ 同步不覆盖）
+  fetched_at   TEXT    NOT NULL       -- 本地写入时间
+);
+CREATE INDEX idx_ltx_date ON ltx_items(publish_date) WHERE rejected = 0;
 ```
 
 > **为什么 `cookies` 用 TEXT/JSON 而不是 BLOB**：Python 侧用 `httpx.Cookies`，
@@ -1059,6 +1082,36 @@ SELECT COUNT(*) FROM posts WHERE cover_img LIKE '%'||?||'%' OR detail_img LIKE '
 **分发缓存头**：`Cache-Control: public, max-age=31536000, immutable`
 （文件名含内容哈希 → 可永久缓存）。
 
+### 5.9 `avdb` —— LTX 数据源（第二个 ed2k 来源）
+
+顶栏的 **LTX** 页不是论坛采集，而是自建 AVdb 实例（`li-peifeng/AVdb-Only`）
+里「LTX破解」板块的**镜像**。模块三层：
+
+```
+LtxSource（用例层）      登录 → 翻页拉全量 → normalize_item → dict
+    │
+AvdbClient（HTTP 层）    POST /api/v1/users/login（表单编码）→ access_token
+    │                    POST /api/v1/articles/search（Bearer JWT）
+    └─ httpx.Client(trust_env=False)   ← ★ 目标是局域网，不能被环境代理劫持
+```
+
+**实测得到的三条硬事实**（详细记录见 `REQUIREMENTS.md` 附录 A.6）：
+
+| 事实 | 影响 |
+|---|---|
+| `/articles/search` **只认 Bearer JWT** | `X-API-Key` / `?api_key=` / `?access_token=` 全部 401（`{"detail":"Not authenticated"}` / `{"detail":"Token 无效"}`）。所以必须用用户名密码换 JWT |
+| JWT **没有 `exp`** | 无法预判过期 → 只在收到 401 时重登一次再重试（且只重试一次，避免把登录玩成暴力破解）。令牌加密存 `ltx.jwt` |
+| 图床直连返回**加密字节** | `tp.spfcas.com` 对直连返回 159 500 B `binary/octet-stream`（无 JPEG magic，PIL 报 "cannot identify image file"）。同一 URL 经 `/api/v1/img-proxy/?url=…` 拿回才是正常 JPEG。见 ADR-20 |
+| `preview_images` 有**三种形状** | 单 URL / **逗号分隔的一串** / 数组。必须按逗号切（AVdb 前端也是 `split(",")`），否则整串当 URL 去请求 → 405 / 破图 |
+| 一次全量 = 7 页 / 658 条 / **约 3.6 秒** | 同步是「秒级」，可以直接同步执行，不需要像采集那样上后台线程 |
+
+**为什么落本地镜像而不是每次实时查**（ADR-19）：日期分组与计数、`tg_sent_at`
+（已下载标记）、AVdb 掉线时的可浏览性——三件事都要求本地有行。
+
+**封面按需本地化**：列表接口**不**逐张下载图片（658 条全预下载是几百 MB，
+而用户只看其中一部分），卡片 `<img>` 走 `/api/ltx/cover/{id}`，首次请求时
+下载 + 转码 600/1200 两档 WebP 落盘，之后直接发文件并带 `immutable` 缓存。
+
 ---
 
 ## 6. 关键流程
@@ -1185,6 +1238,13 @@ APScheduler (15min) 或 POST /api/emby/refresh
 | POST | `/api/auth/login` | `{password}` | `Set-Cookie` | S-6 |
 | POST | `/api/auth/logout` | — | `204` | S-6 |
 | GET | `/api/auth/me` | — | `{authenticated}` | S-6 |
+| GET | `/api/ltx/status` | — | `{configured, synced_at, count, ttl}` | S-10 |
+| POST | `/api/ltx/sync` | — | `{ok, fetched, pruned, count, synced_at}`；`409` 正在同步；`400` 未配置；`502` 上游 | S-10 |
+| GET | `/api/ltx/dates` | — | `[{date, count}]` 升序（形状同 `/api/dates`） | S-10 |
+| GET | `/api/ltx/posts` | `?date=` | `[PostDTO]`（**字段名与 `/api/posts` 完全一致**） | S-10 |
+| GET | `/api/ltx/cover/{id}` | `?w=600\|1200` | WebP 字节（首次请求触发下载+转码，`immutable`） | S-10 |
+| POST | `/api/ltx/{id}/forward` | — | `{ok, message_id}`；`409` 已转发 | S-10 T-7 |
+| POST | `/api/ltx/forward` | `?date=` | `{sent, skipped, failed, errors}` | S-10 T-2 |
 
 **`PUT /api/settings` 按分区提交**，对应 UI 的五个独立保存按钮（S-5）。
 **每次请求只能改一个分区**——分区边界显式，避免客户端一次误改多处：
@@ -1342,6 +1402,49 @@ log.error("emby.sync.failed", exc_info=True)     # 但不影响浏览
 | ADR-21 | **找不到用户时退回全部库 + 警示提示，而非报错** | 过滤只是「帮你少看几个库」；报错会让设置页整个用不了，且用户只是想先看看有哪些库 | 报错/空列表：用户无法自救，也看不到可选项 |
 
 ---
+
+### ADR-19：LTX 用独立镜像表，不并进 `posts`
+
+**背景**：第二个 ed2k 来源（AVdb 的 LTX破解 板块）字段与 4K 帖子高度重叠，
+最省事的做法是把行插进 `posts` 加一列 `source`。
+
+**决策**：新建 `ltx_items` 表 + `LtxRepo`，浏览路径完全独立；只在 DTO 层
+（`LtxPostDTO`）把字段名对齐，让前端一套卡片模板同时服务两个来源。
+
+**理由**：
+
+1. **语义不同**：`posts` = 「我采集过的帖子」，每行都对应一次论坛访问、一次
+   图片本地化、一条 `pending→done` 状态机。AVdb 的行只是别人的列表项，
+   塞进去会让 `status`/`retry_count`/`next_retry_at` 这些列全部说谎。
+2. **写入模式不同**：`posts` 是增量插入（新帖一条条来）；LTX 是整表覆盖式
+   同步（658 条一次到齐 + 上游删除要跟着删）。upsert + prune 放在 `posts`
+   上会误伤真实归档。
+3. **失败隔离**：AVdb 挂了只影响「同步」这一个动作，镜像照常可翻；
+   两者混表后一次同步失败就可能拖累归档查询。
+4. **成本极低**：一张 15 列表 + 一个仓储 + DTO 映射，比在 `posts` 里到处
+   加 `WHERE source=?` 便宜得多。
+
+**代价**：两套仓储/路由有相似代码；已用「DTO 字段名严格一致 + 前端按
+`source` 只切端点」把重复压到最小。
+
+### ADR-20：LTX 封面必须经 AVdb 的图床代理
+
+**背景**：`ltx_items.cover_url` 指向图床（`tp.spfcas.com` / `awsimgsrc.dmm.com`）。
+
+**决策**：不直连图床，改为请求 `{avdb}/api/v1/img-proxy/?url=…&mode=cover&w=1200&q=85&fmt=webp`。
+
+**理由**（实测）：
+
+- `tp.spfcas.com` 对直连返回 **159 500 B 的 `binary/octet-stream`**，没有
+  JPEG magic，PIL 报 `cannot identify image file` —— 热链保护，拿到的是
+  加密字节。同一 URL 经 `img-proxy` 回来是正常 JPEG（800×536）。
+- 走代理的附带好处：**出网由 AVdb 负责**，本机不需要为图床配翻墙；
+  代价只是多一跳内网请求。
+- 请求 `w=1200`（灯箱档）：`ImageCache` 只下载一次，再缩出 600/1200 两档，
+  只取 600 会让灯箱把 600 放大显示。
+
+**注意**：该端点是 `trust_env=False` 调用（目标是局域网），且**不带**
+`Authorization`（实测无需鉴权；为一张缩略图先登录一次不划算）。
 
 ## 14. 待确认（阻塞实现）
 

@@ -32,8 +32,11 @@ __all__ = [
     "AlreadySent",
     "RateLimited",
     "build_message",
+    "build_ed2k_message",
     "forward_post",
     "forward_many",
+    "forward_ltx",
+    "forward_ltx_many",
     "API_BASE",
     "MIN_INTERVAL_SECONDS",
 ]
@@ -217,6 +220,87 @@ def forward_post(
     return message_id
 
 
+def build_ed2k_message(ed2k: str | None, label: str) -> str:
+    """只有链接本身的文本（与 :func:`build_message` 同一约定）。
+
+    ★ 抽出来是为了让 LTX 复用**完全一样**的消息形状：Bot 侧按行提取链接，
+      两个来源发出两种格式会让那边多一套解析。
+    """
+    if not ed2k:
+        raise TelegramError(f"{label} 没有 ed2k 链接，无法转发")
+    return ed2k[:MAX_MESSAGE_LEN]
+
+
+def forward_ltx(
+    item: Any,
+    *,
+    client: TelegramClient,
+    ltx_repo: Any,
+) -> int:
+    """转发一条 LTX 资源，成功后写入 ``tg_sent_at``。
+
+    ``item`` 是 :class:`bt169.models.LtxItem`（鸭子类型即可：只用
+    ``id`` / ``ed2k`` / ``tg_sent_at``）。
+
+    ★ 与 4K 走**同一套发送链路**（``get_sender`` → MTProto 或 Bot API）：
+      LTX 同样是「把 ed2k 丢给 Bot 侧接手」，不是文件下载。
+    """
+    if item.tg_sent_at is not None:
+        raise AlreadySent(f"LTX 资源 {item.id} 已于 {item.tg_sent_at} 转发过")
+
+    message_id = client.send(build_ed2k_message(item.ed2k, f"LTX 资源 {item.id}"))
+    ltx_repo.mark_tg_sent(item.id, _now())
+    log.info("LTX %s 已转发到 Telegram（message_id=%s）", item.id, message_id)
+    return message_id
+
+
+def _forward_loop(
+    items: list[Any],
+    *,
+    send_one: Any,
+    ident: Any,
+    interval: float,
+    sleep: Any,
+) -> dict[str, Any]:
+    """串行转发循环（4K 与 LTX 共用）。
+
+    ★ **串行 + 间隔 ≥ ``interval`` 秒**：Telegram 群组约 20 条/分钟，
+    并发发送必然触发 429，反而更慢。
+
+    ★ **单条失败不中断整批**：一条发不出去不该让后面所有条目都失败。
+    失败原因记进 ``errors``，让前端能逐条重试（需求 T-6）。
+    """
+    sent = skipped = failed = 0
+    errors: list[dict[str, Any]] = []
+
+    for i, item in enumerate(items):
+        if i > 0:
+            sleep(interval)
+        try:
+            send_one(item)
+            sent += 1
+        except AlreadySent:
+            skipped += 1
+        except RateLimited as exc:
+            # ★ 被限流就停手：继续发只会越撞越久。把剩余条目如实报告为失败，
+            #   让用户稍后重试——比硬撑下去触发更长的封禁好。
+            failed += 1
+            errors.append({"tid": ident(item), "error": str(exc)})
+            remaining = items[i + 1:]
+            for rest in remaining:
+                failed += 1
+                errors.append({
+                    "tid": ident(rest),
+                    "error": f"因限流跳过（前一条需等待 {exc.retry_after} 秒）",
+                })
+            break
+        except TelegramError as exc:
+            failed += 1
+            errors.append({"tid": ident(item), "error": str(exc)})
+
+    return {"sent": sent, "skipped": skipped, "failed": failed, "errors": errors}
+
+
 def forward_many(
     posts: list[Post],
     *,
@@ -225,46 +309,36 @@ def forward_many(
     interval: float = MIN_INTERVAL_SECONDS,
     sleep: Any = time.sleep,
 ) -> dict[str, Any]:
-    """批量转发（需求 T-2）。
-
-    ★ **串行 + 间隔 ≥ ``interval`` 秒**：Telegram 群组约 20 条/分钟，
-    并发发送必然触发 429，反而更慢。
-
-    ★ **单条失败不中断整批**：一条发不出去不该让后面所有帖子都失败。
-    失败原因记进 ``errors``，让前端能逐条重试（需求 T-6）。
+    """批量转发 4K 帖子（需求 T-2）。
 
     Returns:
         ``{"sent": int, "skipped": int, "failed": int, "errors": [...]}``
     """
-    sent = skipped = failed = 0
-    errors: list[dict[str, Any]] = []
+    return _forward_loop(
+        posts,
+        send_one=lambda p: forward_post(p, client=client, posts_repo=posts_repo),
+        ident=lambda p: p.tid,
+        interval=interval,
+        sleep=sleep,
+    )
 
-    for i, post in enumerate(posts):
-        if i > 0:
-            sleep(interval)
-        try:
-            forward_post(post, client=client, posts_repo=posts_repo)
-            sent += 1
-        except AlreadySent:
-            skipped += 1
-        except RateLimited as exc:
-            # ★ 被限流就停手：继续发只会越撞越久。把剩余帖子如实报告为失败，
-            #   让用户稍后重试——比硬撑下去触发更长的封禁好。
-            failed += 1
-            errors.append({"tid": post.tid, "error": str(exc)})
-            remaining = posts[i + 1:]
-            for p in remaining:
-                failed += 1
-                errors.append({
-                    "tid": p.tid,
-                    "error": f"因限流跳过（前一条需等待 {exc.retry_after} 秒）",
-                })
-            break
-        except TelegramError as exc:
-            failed += 1
-            errors.append({"tid": post.tid, "error": str(exc)})
 
-    return {"sent": sent, "skipped": skipped, "failed": failed, "errors": errors}
+def forward_ltx_many(
+    items: list[Any],
+    *,
+    client: TelegramClient,
+    ltx_repo: Any,
+    interval: float = MIN_INTERVAL_SECONDS,
+    sleep: Any = time.sleep,
+) -> dict[str, Any]:
+    """批量转发某日 LTX 资源（返回形状与 :func:`forward_many` 一致）。"""
+    return _forward_loop(
+        items,
+        send_one=lambda it: forward_ltx(it, client=client, ltx_repo=ltx_repo),
+        ident=lambda it: it.id,
+        interval=interval,
+        sleep=sleep,
+    )
 
 
 def _now() -> str:

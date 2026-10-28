@@ -8,7 +8,9 @@ from bt169.repo.settings import SettingsRepo
 def test_get_settings_empty(client):
     r = client.get("/api/settings")
     assert r.status_code == 200
-    assert r.json() == {s: {} for s in ("site", "basic", "proxy", "emby", "tg")}
+    assert r.json() == {
+        s: {} for s in ("site", "ltx", "basic", "proxy", "emby", "tg")
+    }
 
 
 def test_put_then_get_roundtrip(client):

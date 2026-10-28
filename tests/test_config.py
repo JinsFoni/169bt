@@ -97,7 +97,16 @@ def test_section_key_namespacing():
 
 def test_settings_sections_site_first():
     assert SETTINGS_SECTIONS[0] == "site"
-    assert set(SETTINGS_SECTIONS) == {"site", "basic", "proxy", "emby", "tg"}
+    # ltx 紧跟 site：两个都是数据源，设置页里挨着才顺手
+    assert SETTINGS_SECTIONS[:2] == ("site", "ltx")
+    assert set(SETTINGS_SECTIONS) == {
+        "site", "ltx", "basic", "proxy", "emby", "tg"
+    }
+
+
+def test_jwt_is_secret():
+    """AVdb 的 JWT 落库必须加密（拿到它等于拿到那个账号）。"""
+    assert is_secret("ltx.jwt")
 
 
 def test_placeholder_is_eight_dots():

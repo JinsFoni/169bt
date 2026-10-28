@@ -44,6 +44,9 @@
   var lbCode      = $('lbCode');
   var lbActress   = $('lbActress');
   var toastStack  = $('toastStack');
+  var sourceNav   = $('sourceNav');
+  var collectBtn  = $('collectBtn');
+  var sessionChip = $('sessionChip');
 
   var lastFocused = null;
 
@@ -57,6 +60,17 @@
   //   整页刷新）。现在只原地更新目标按钮，其余卡片纹丝不动。
   var tgSendingDay = false;   // 批量转发中（顶栏「下载本日」，全局唯一）
   var tgSendingTids = {};     // tid → true，单帖转发中（ES5 环境用普通对象当 Set）
+
+  /* 数据源（S-1）。两个来源的**接口形状与 DTO 字段完全一致**，
+     所以视图层只需要在这几处分支：取日期、取帖子、删除（只有 4K 有）、
+     转发端点、文案量词（帖 / 条）。其余渲染路径一份代码。 */
+  var SOURCE_KEY = 'bt169.source';
+  var source = '4k';          // '4k' = 169bt 论坛采集；'ltx' = AVdb LTX破解
+
+  function isLtx() { return source === 'ltx'; }
+
+  /* 量词：论坛有「帖」的概念，AVdb 是把资源条目，用「条」更准确 */
+  function unit() { return isLtx() ? '条' : '帖'; }
 
   /* 月历选择器状态：当前展示的「2000-01」，非自然今天，以数据为界 */
   var pickYM = null;          // null = 面板关闭
@@ -157,9 +171,10 @@
 
   /* ---------- 归档日期 ---------- */
 
-  /* 日期列表来自后端（`/api/dates` → [{date, count}]，后端按降序返回） */
+  /* 日期列表来自后端（`/api/dates` 或 `/api/ltx/dates` → [{date, count}]） */
   function loadDates() {
-    return window.api.getDates().then(function (rows) {
+    var req = isLtx() ? window.api.getLtxDates() : window.api.getDates();
+    return req.then(function (rows) {
       rows = rows || [];
       dateList = rows.map(function (r) { return r.date; }).sort();
       counts = {};
@@ -169,6 +184,117 @@
   }
 
   function countOf(date) { return counts[date] || 0; }
+
+  /* ---------- 数据源切换（4K / LTX） ----------
+
+     两个来源在后端是两套接口，但 DTO 字段一模一样（见 LtxPostDTO），
+     所以这里只做「换一套状态 + 换端点」，渲染路径一份代码。 */
+
+  var ltxSyncing = false;     // LTX 同步进行中（防重复触发）
+
+  /* 顶栏外观随数据源变化：LTX 页没有「采集」按钮（那是论坛专用），
+     也没有论坛会话状态（论坛 Cookie 只影响 4K 采集）。 */
+  function applySourceChrome() {
+    if (collectBtn) collectBtn.hidden = isLtx();
+    if (isLtx() && sessionChip) sessionChip.hidden = true;
+
+    if (sourceNav) {
+      Array.prototype.forEach.call(
+        sourceNav.querySelectorAll('.src'), function (b) {
+          var on = b.dataset.src === source;
+          b.setAttribute('aria-selected', on ? 'true' : 'false');
+          b.tabIndex = on ? 0 : -1;
+        });
+    }
+  }
+
+  function saveSource() {
+    try { localStorage.setItem(SOURCE_KEY, source); } catch (e) { /* 隐私模式 */ }
+  }
+
+  function loadSource() {
+    try {
+      var v = localStorage.getItem(SOURCE_KEY);
+      if (v === 'ltx' || v === '4k') return v;
+    } catch (e) { /* 隐私模式：用默认值 */ }
+    return '4k';
+  }
+
+  /*
+   * 切数据源 = 换一整套状态（日期列表、按日缓存、当前日）并重取。
+   *
+   * ★ 三个缓存必须一起清：``days`` 是按日期的帖子缓存，而两个来源的
+   *   日期很可能完全重合（都落在 2026-10）。不清缓存就会出现「切到 LTX
+   *   却看到 4K 的卡片」——数据是错的，比慢更糟。
+   *
+   * ★ ``currentReq++`` 让在途请求作废：切走那一刻发出去的请求回来时
+   *   若落地，会把旧来源的数据画到新页面上（loadPosts 的竞态令牌）。
+   */
+  function setSource(name) {
+    if (name !== 'ltx' && name !== '4k') return Promise.resolve();
+    if (name === source) return Promise.resolve();
+
+    source = name;
+    saveSource();
+    applySourceChrome();
+
+    dateList = [];
+    counts = {};
+    days = {};
+    posts = [];
+    postsDate = null;
+    activeDate = null;
+    deleted = [];
+    loading = false;
+    currentReq++;
+    if (skeletonTimer) { clearTimeout(skeletonTimer); skeletonTimer = null; }
+    pickClose();
+    render();
+
+    return boot().then(function () {
+      if (isLtx()) return maybeSyncLtx();
+    });
+  }
+
+  /*
+   * 打开 LTX 页时按 TTL 自动同步（后端 ``LTX_SYNC_TTL``，默认 600 秒）。
+   *
+   * ★ 为什么自动：AVdb 每天都有新条目，用户切到 LTX 就是想看最新的。
+   *   要求他先去设置页点「同步」，等于把「看到过期数据」当默认行为。
+   * ★ 为什么不是每次：一次同步 = 7 个上游请求 + 几百行写库。来回切标签
+   *   会变成拿自己的账号去打上游。
+   * ★ 失败只提示不清屏：本地镜像照常能翻。
+   */
+  function maybeSyncLtx() {
+    if (!isLtx() || ltxSyncing) return Promise.resolve();
+    return api.getLtxStatus().then(function (s) {
+      if (!s || !s.configured) return;
+      var ttl = (s.ttl || 600) * 1000;
+      var last = Date.parse(s.synced_at || '');
+      // NaN（从未同步过或格式不认识）→ 视为过期，同步一次
+      var stale = !s.count || isNaN(last) || (Date.now() - last > ttl);
+      if (!stale) return;
+      return syncLtxQuiet();
+    }).catch(function () { /* 状态拉不到就跳过：不打扰 */ });
+  }
+
+  function syncLtxQuiet() {
+    if (ltxSyncing) return Promise.resolve();
+    ltxSyncing = true;
+
+    var dismiss = toast('正在同步 LTX 资源…', 'info', { duration: 60000 });
+    return api.syncLtx().then(function (res) {
+      if (dismiss) dismiss();
+      toast('LTX 已更新：' + res.count + ' 条', 'ok', { duration: 3000 });
+      // 新条目可能落在新的日期（今天）→ 重取日期列表并刷新当前日
+      return window.reloadDates();
+    }).catch(function (e) {
+      if (dismiss) dismiss();
+      toast('LTX 同步失败：' + e.message, 'err', { duration: 5000 });
+    }).then(function () {
+      ltxSyncing = false;
+    });
+  }
 
   /*
    * 取 TG 配置状态（需求 T-4）。
@@ -199,6 +325,9 @@
   function renderSession(sess) {
     var chip = document.getElementById('sessionChip');
     if (!chip) return;
+
+    // LTX 页与论坛会话无关（论坛 Cookie 只影响 4K 采集），挂着是噪声
+    if (isLtx()) { chip.hidden = true; return; }
 
     if (!sess || !sess.valid) {
       chip.hidden = false;
@@ -301,7 +430,8 @@
       if (activeDate === date) render();
     }, SKELETON_DELAY);
 
-    return window.api.getPosts(date).then(function (list) {
+    var req2 = isLtx() ? window.api.getLtxPosts(date) : window.api.getPosts(date);
+    return req2.then(function (list) {
       if (activeDate !== date || req !== currentReq) return;   // 已切走/已被取代
       loading = false;
       if (skeletonTimer) { clearTimeout(skeletonTimer); skeletonTimer = null; }
@@ -395,6 +525,14 @@
     var sizeHTML = p.size
       ? '<span class="meta-item"><svg viewBox="0 0 20 20" aria-hidden="true"><ellipse cx="10" cy="5.5" rx="6" ry="2.5"/><path d="M4 5.5v9c0 1.4 2.7 2.5 6 2.5s6-1.1 6-2.5v-9M4 10c0 1.4 2.7 2.5 6 2.5s6-1.1 6-2.5"/></svg>' + esc(p.size) + '</span>'
       : '';
+    // ★ LTX 不给删除按钮：它是**镜像**（上游 AVdb 才是权威），删掉本地
+    //   这一行下次同步又长回来，用户会以为删除坏了。4K 帖子是本地采集的
+    //   归档记录，删了就是删了，所以保留。
+    var delHTML = isLtx() ? '' :
+      '<button class="act act-del" type="button" data-act="del" title="删除这条记录" aria-label="删除">' +
+        '<svg viewBox="0 0 20 20"><path d="M4 6.5h12M8.5 6.5V5a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v1.5M6 6.5l.7 8.4a1 1 0 0 0 1 .9h4.6a1 1 0 0 0 1-.9l.7-8.4"/></svg>' +
+      '</button>';
+
     var actressHTML = p.actress
       ? '<span class="info-actress"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="6.5" r="3.25"/><path d="M4 16.5c.8-3 3.2-4.5 6-4.5s5.2 1.5 6 4.5"/></svg>' + esc(p.actress) + '</span>'
       : '';
@@ -433,9 +571,7 @@
                             : ' title="尚未配置 Telegram，请先到设置页填写"')))) + '>' +
               '<svg viewBox="0 0 20 20"><path d="M10 3.5v9m0 0 3.5-3.5M10 12.5 6.5 9M4 16.5h12"/></svg>' +
               (tgSendingTids[p.tid] ? '发送中' : (p.tg_sent_at ? '已下载' : '下载')) + '</button>' +
-            '<button class="act act-del" type="button" data-act="del" title="删除这条记录" aria-label="删除">' +
-              '<svg viewBox="0 0 20 20"><path d="M4 6.5h12M8.5 6.5V5a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v1.5M6 6.5l.7 8.4a1 1 0 0 0 1 .9h4.6a1 1 0 0 0 1-.9l.7-8.4"/></svg>' +
-            '</button>' +
+            delHTML +
           '</div>' +
         '</div>' +
 
@@ -452,7 +588,9 @@
 
     /* 顶栏 */
     dateValue.textContent = activeDate ? slashDate(activeDate) : '—';
-    dateMeta.textContent  = activeDate ? (humanDate(activeDate).split(' ')[1] + ' · ' + total + ' 帖') : '—';
+    dateMeta.textContent  = activeDate
+      ? (humanDate(activeDate).split(' ')[1] + ' · ' + total + ' ' + unit())
+      : '—';
 
     // 上一页 = 更早（◀），下一页 = 更晚（▶）
     var i = dateList.indexOf(activeDate);
@@ -502,10 +640,13 @@
       grid.innerHTML = '';
       grid.hidden = true;
       empty.hidden = false;
-      empty.querySelector('.empty-title').textContent = '这一天没有帖子';
-      empty.querySelector('.empty-hint').textContent =
-        dateList.length ? '用上方的 ◀ ▶ 按钮切换到其他归档日。'
-                        : '点顶栏的采集按钮，把帖子抓回来。';
+      empty.querySelector('.empty-title').textContent =
+        isLtx() ? '这一天没有资源' : '这一天没有帖子';
+      empty.querySelector('.empty-hint').textContent = dateList.length
+        ? '用上方的 ◀ ▶ 按钮切换到其他归档日。'
+        : (isLtx()
+            ? '点顶栏 LTX 右侧的设置，在「LTX 数据源」里点「立即同步」把资源拉下来。'
+            : '点顶栏的采集按钮，把帖子抓回来。');
     } else {
       empty.hidden = true;
       grid.hidden = false;
@@ -659,7 +800,8 @@
     tgSendingTids[p.tid] = true;
     syncCardButton(p.tid);
 
-    api.forward(p.tid).then(function () {
+    var req = isLtx() ? api.forwardLtx(p.tid) : api.forward(p.tid);
+    req.then(function () {
       toast('已转发 ' + p.code + ' 到 Telegram', 'ok', { duration: 2400 });
       p.tg_sent_at = new Date().toISOString();
     }).catch(function (e) {
@@ -715,7 +857,9 @@
     var n = links.length;
     toast('正在转发 ' + n + ' 条到 Telegram…', 'ok', { duration: 60000 });
 
-    api.forwardDay(activeDate, n).then(function (r) {
+    var req = isLtx() ? api.forwardLtxDay(activeDate, n)
+                      : api.forwardDay(activeDate, n);
+    req.then(function (r) {
       var parts = [];
       if (r.sent)    parts.push('成功 ' + r.sent);
       if (r.skipped) parts.push('已发过 ' + r.skipped);
@@ -863,7 +1007,7 @@
                 (iso === activeDate ? ' is-active' : '');
       html += has
         ? '<button class="' + cls + '" type="button" data-date="' + iso + '"' +
-          ' title="' + humanDate(iso) + ' · ' + countOf(iso) + ' 帖">' + d + '</button>'
+          ' title="' + humanDate(iso) + ' · ' + countOf(iso) + ' ' + unit() + '">' + d + '</button>'
         : '<span class="' + cls + '" aria-hidden="true">' + d + '</span>';
     }
     pickGrid.innerHTML = html;
@@ -928,6 +1072,24 @@
     openLightbox(p);
   });
 
+  if (sourceNav) {
+    sourceNav.addEventListener('click', function (e) {
+      var btn = e.target.closest('.src');
+      if (btn) setSource(btn.dataset.src);
+    });
+
+    // 左右键在 tablist 内切换（与设置侧栏同一惯例）；
+    // ★ stopPropagation：document 上的 ←/→ 是翻归档日期，别一起触发
+    sourceNav.addEventListener('keydown', function (e) {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      e.preventDefault();
+      e.stopPropagation();
+      setSource(isLtx() ? '4k' : 'ltx');
+      var btn = sourceNav.querySelector('.src[data-src="' + source + '"]');
+      if (btn) btn.focus();
+    });
+  }
+
   prevDay.addEventListener('click', function () { step(-1); });
   nextDay.addEventListener('click', function () { step(1); });
   copyDay.addEventListener('click', copyDayAll);
@@ -983,12 +1145,24 @@
   /* app.js 的 toast 供 collect.js 复用（全局单例只有这一个 UI 出口） */
   window.toast = toast;
 
+  /* 数据源：沿用上次的选择（localStorage），默认 4K。
+     ★ 必须在下一次 render() 之前定好：applySourceChrome 控制采集按钮与
+       会话 chip 的显隐，晚一步就会先画错再修正（视觉抖动）。 */
+  source = loadSource();
+  applySourceChrome();
+
   /* ★ 经门禁启动（S-6）：未认证时先让用户输密码，认证后再取数。
      门禁未启用时 gate.start 会立即回调，行为与直接 boot() 一致。 */
+  function bootWithSource() {
+    return boot().then(function () {
+      if (isLtx()) return maybeSyncLtx();
+    });
+  }
+
   if (window.gate && window.gate.start) {
-    window.gate.start(boot);
+    window.gate.start(bootWithSource);
   } else {
-    boot();
+    bootWithSource();
   }
 
   // 调试入口
@@ -998,7 +1172,9 @@
     get dates()   { return dateList; },
     get active()  { return activeDate; },
     get pickerOpen() { return pickYM !== null; },
+    get source()  { return source; },
     renderSession: renderSession,
-    reload: boot
+    reload: boot,
+    reloadSource: setSource
   };
 })();

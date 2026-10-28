@@ -65,6 +65,8 @@
     panes.forEach(function (p) {
       p.hidden = p.dataset.pane !== name;
     });
+    // 切到 LTX 分区时重拉一次状态：用户可能刚在别处同步过
+    if (name === 'ltx') loadLtxStatus();
   }
 
   navBtns.forEach(function (btn) {
@@ -104,6 +106,8 @@
   var FIELDS = {
     site:  [['rss_url', 'siteRss'], ['rss_cron', 'siteRssCron'],
             ['username', 'siteUser'], ['password', 'sitePass']],
+    ltx:   [['base_url', 'ltxBase'], ['username', 'ltxUser'],
+            ['password', 'ltxPass'], ['api_key', 'ltxKey']],
     basic: [['password', 'setPassword']],
     proxy: [['type', 'proxyType'], ['host', 'proxyHost'], ['port', 'proxyPort'],
             ['username', 'proxyUser'], ['password', 'proxyPass']],
@@ -307,6 +311,7 @@
       // ★ 媒体库下拉框的选项**不来自设置**，来自 Emby 的库列表。
       //   每次打开面板都重拉：用户可能刚在 Emby 里建了新库。
       loadLibraries(data && data.emby ? data.emby.library : '');
+      loadLtxStatus();      // 运行时事实，单独拉（见下方 LTX 区块）
     }).catch(function (e) {
       toast('无法读取设置：' + e.message, 'err', { duration: 5000 });
     });
@@ -381,6 +386,89 @@
   }
 
   function escAttr(s) { return escHtml(s); }
+
+  /* ---------- LTX 数据源：状态条 + 立即同步 ----------
+
+     ★ 与 Telegram「先保存再测」同一个坑：后端同步时从**数据库**读
+       AVdb 地址与账号，用户刚敲进去的值还在 DOM 里。不先保存就同步，
+       用的是旧凭据（或干脆「未配置」）。
+
+     ★ 状态条单独拉 ``/api/ltx/status``，不塞进 ``/api/settings``：
+       后者是「配置」，前者是「运行时事实」（本地多少条、上次何时同步）。
+       混在一起会让每次读设置都顺带查一次计数。 */
+
+  function loadLtxStatus() {
+    var el = $('ltxStat');
+    if (!el) return;
+    window.api.getLtxStatus().then(renderLtxStat).catch(function () {
+      el.hidden = true;          // 后端没有该接口（旧版）→ 静默，不打扰
+    });
+  }
+
+  /* 2026-10-28T18:30:12+08:00 → 2026/10/28 18:30 */
+  function fmtSyncedAt(iso) {
+    var m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(String(iso || ''));
+    return m ? m[1] + '/' + m[2] + '/' + m[3] + ' ' + m[4] + ':' + m[5] : '';
+  }
+
+  function renderLtxStat(s) {
+    var el = $('ltxStat');
+    if (!el || !s) return;
+
+    var parts = [];
+    if (!s.configured) {
+      parts.push('未配置：填好地址与账号密码并保存，再点「立即同步」。');
+    } else if (!s.count) {
+      parts.push('本地还没有数据，点「立即同步」把 LTX破解 板块拉下来。');
+    } else {
+      parts.push('本地镜像 <b>' + s.count + '</b> 条');
+      var when = fmtSyncedAt(s.synced_at);
+      if (when) parts.push('上次同步 ' + when);
+      else parts.push('尚未记录同步时间');
+      if (s.ttl) {
+        parts.push('（打开 LTX 页时若超过 ' + Math.round(s.ttl / 60) +
+                   ' 分钟会自动同步）');
+      }
+    }
+
+    el.innerHTML = parts.join('，').replace(/，（/g, '（');
+    el.classList.toggle('is-warn', !s.configured);
+    el.hidden = false;
+  }
+
+  function syncLtx(btn) {
+    btn.disabled = true;
+    setState('ltx', '正在同步…');
+
+    var values = collect('ltx');
+    var prep = values.password === PLACEHOLDER
+      ? Promise.resolve(null)
+      : window.api.saveSettings('ltx', values);
+
+    prep.then(function () {
+      return window.api.syncLtx();
+    }).then(function (res) {
+      btn.disabled = false;
+      var msg = '已同步 ' + res.fetched + ' 条（共 ' + res.count + ' 条）';
+      setState('ltx', msg, 'ok');
+      toast('LTX ' + msg, 'ok', { duration: 3600 });
+      loadLtxStatus();
+      // LTX 页可能正开着：让它按新数据重画（app.js 暴露的调试/联动入口）
+      var a = window.__archive;
+      if (a && a.reloadSource) a.reloadSource('ltx');
+    }).catch(function (e) {
+      btn.disabled = false;
+      setState('ltx', e.message, 'err');
+      toast('同步失败：' + e.message, 'err', { duration: 6000 });
+    });
+  }
+
+  var ltxSyncBtn = $('ltxSyncNow');
+  if (ltxSyncBtn) {
+    ltxSyncBtn.addEventListener('click', function () {
+      if (!ltxSyncBtn.disabled) syncLtx(ltxSyncBtn);
+    });
+  }
 
   /* ---------- 保存：按分区提交 ---------- */
 

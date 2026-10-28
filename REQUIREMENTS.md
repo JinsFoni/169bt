@@ -50,6 +50,10 @@
 | 25 | 图床**无 CORS 头** → 跨域响应为 `opaque` | SW 缓存 opaque 按 padding 计配额（~7 MB/条）→ 外链无法离线 |
 | 26 | 外链 + 懒加载实测：首屏 5 张图 **4.22 MB**，滚完 13 张 **11.11 MB**，load **2338 ms** | 懒加载有效但不够；印证本地化 + 缩放的必要性 |
 | 27 | 登录失败额度默认 **5 次 / 900 秒自动重置**（Discuz 源码） | 非永久限制；但新版行为需实测校准 |
+| 28 | AVdb 的 `/articles/search` **只认 Bearer JWT**（API Key 全部 401），且 JWT **无 `exp`** | 必须账号密码换令牌；只在 401 时重登（附录 A.6） |
+| 29 | LTX 板块全量 **658 条 / 7 页 / 3.6 秒** | 同步可直接同步执行，无需后台任务 |
+| 30 | 图床 `tp.spfcas.com` 直连返回**加密字节**（无 JPEG magic）；经 AVdb `img-proxy` 才是正常图片 | 封面必须走上游代理（ADR-20） |
+| 31 | `preview_images` 可能是**逗号分隔的多个 URL** | 必须按逗号切分，否则整串当 URL 请求会 405 |
 
 ---
 
@@ -196,7 +200,7 @@ GET https://169bt.com/forum.php?mod=forumdisplay&fid=192&orderby=dateline&page=N
 |---|---|---|
 | S-1 | 入口 | 顶栏**日期切换左侧**的齿轮按钮 |
 | S-2 | 形态 | **居中悬浮卡片**，内部左侧分区导航 |
-| S-3 | 分区 | **站点** / 基础设置 / 网络代理 / Emby / Telegram（共 **5** 个） |
+| S-3 | 分区 | **站点** / **LTX 数据源** / 基础设置 / 网络代理 / Emby / Telegram（共 **6** 个） |
 | S-4 | 只显示当前分区的配置项 | 切换分区不串显其他分区字段 |
 | S-5 | **每个分区各有独立保存按钮** | 各自保存、各自反馈 |
 | S-6 | 基础设置 | 访问密码（**后端校验**：PBKDF2 哈希 + 会话 token）✅ |
@@ -226,6 +230,27 @@ GET https://169bt.com/forum.php?mod=forumdisplay&fid=192&orderby=dateline&page=N
 
 > **提前退出**：列表页按发帖日期**降序**排列（已实测），发现某页最旧日期
 > 早于起始日期即停止翻页，无需翻完 225 页。
+
+---
+
+### 4.7 LTX 数据源（第二个 ed2k 来源）
+
+来源：自建 AVdb 实例（`li-peifeng/AVdb-Only`）里 **LTX破解** 板块。
+用户决策：做成和 4K 一样**能翻页的列表**（不是只有搜索），卡片同样支持
+**复制** 与 **转发到 TG**。凭据（AVdb 账号密码）像论坛密码一样**加密存设置**。
+
+| 编号 | 需求 | 说明 |
+|---|---|---|
+| L-1 | 入口 | 顶栏品牌名右侧的分段标签 **4K / LTX**，选择记忆在 `localStorage` |
+| L-2 | 列表形态 | 与 4K **完全一致**：日期条、◀ ▶ 翻页、月历、卡片网格、灯箱 |
+| L-3 | 数据获取 | 后端定时/按需从 AVdb 拉全量到本地镜像（`ltx_items`），浏览**不实时**打上游 |
+| L-4 | 同步时机 | 打开 LTX 页时若距上次同步 > **600 秒**则自动同步；设置页另有「立即同步」 |
+| L-5 | 封面 | 经 AVdb 图床代理按需下载并本地化（600 / 1200 两档 WebP），列表接口不预下载 |
+| L-6 | 复制 / 转发 | 单条复制 ed2k、单条转发 TG、当日全量转发 —— 与 4K 同语义、同返回形状 |
+| L-7 | 不提供删除 | LTX 是镜像（上游才是权威），删本地行下次同步会回来，故不给删除按钮 |
+| L-8 | 与论坛态解耦 | LTX 页隐藏「采集」按钮与论坛会话 chip；TG 未配置时同样禁用转发并提示 |
+| L-9 | 设置项 | AVdb 地址 / 账号 / 密码 / API Key（可选）+ 上次同步时间与本地条数提示 |
+| L-10 | 配置校验 | 地址必须是完整 `http(s)://`，尾部斜杠归一 |
 
 ---
 
@@ -432,6 +457,26 @@ ed2k      : ed2k://|file|s169bbs.com@START-624_[4K].mkv|7515146184|0B17E95CBBA18
 ---
 
 ---
+
+### A.6 AVdb（LTX）API 实测
+
+实测环境：`http://192.168.0.108:8000`，账号 `mario`，2026-10。
+
+| 项 | 实测结果 |
+|---|---|
+| 登录 | `POST /api/v1/users/login`，**表单编码**（`application/x-www-form-urlencoded`，不是 JSON）→ `data.access_token`。两步验证账号会返回 `requires_2fa`，本项目不支持 |
+| JWT 载荷 | `{"sub":"mario","ver":0}` —— **没有 `exp`**，无法预判过期；只能靠 401 触发重登 |
+| 检索鉴权 | `POST /api/v1/articles/search` **只认 `Authorization: Bearer <JWT>`**。`X-API-Key` / `?api_key=` / `?access_token=` 全部 401：`{"detail":"Not authenticated"}`（无令牌）或 `{"detail":"Token 无效"}`（令牌无效/过期） |
+| 检索请求体 | `{"page":1,"page_size":100,"website":"ltx","section":"LTX破解"}`；`page_size` 上限 100 |
+| 检索响应 | `data = {page, pageSize, total: 658, hasMore, items[]}` |
+| 条目字段 | `tid`（16 位合成整数）、`title`、`number`、`publish_date`、`size_bytes`、`magnet`（LTX 这里是 ed2k）、`preview_images`、`detail_url`、`section`、`create_time`、`rejected`、`emby_*`、`tags` |
+| 全量规模 | **658 条 / 7 页 / 约 3.6 秒**（2026-10-28 实测） |
+| `GET /api/v1/stats` | 可用 API Key 调，返回 `{'alias':'LTX破解','site':'ltx','count':658}` |
+| `GET /api/v1/articles/torrents?keyword=` | 只做关键字 LIKE（number+title）、**无分页**：`SSIS`→3346 条（含 36 条 ltx）、`157`→771 条、`%`→448296 条/277 MB、`-`→358746 条/222 MB。**不能用来列全量** |
+| 图床直连 | `tp.spfcas.com` 返回 159 500 B `binary/octet-stream`（无 JPEG magic，PIL 无法识别）——热链保护，拿到的是加密字节 |
+| 图床代理 | `GET /api/v1/img-proxy/?url=<urlencoded>&mode=cover&w=&q=&fmt=webp&cover_all=0` → 正常 JPEG/WebP，**无需鉴权**。AVdb 前端（`src-lib-image-cache`）就是这么包所有远端图片的 |
+| `preview_images` 形状 | 三种：单 URL / **逗号分隔的多 URL** / 数组。必须按逗号切分（前端也是 `split(",")`） |
+| 代理 | AVdb 在**局域网**，客户端必须 `trust_env=False`，否则会被应用/环境里的外网代理劫持 |
 
 ## 附录 B：UI 实现现状（`ui/`）
 

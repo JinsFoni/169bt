@@ -65,6 +65,7 @@ def create_app(
         collect,
         emby,
         health,
+        ltx,
         posts,
         settings,
         status,
@@ -83,6 +84,9 @@ def create_app(
     app.include_router(status.router)
     app.include_router(telegram.router)
     app.include_router(emby.router)
+    # ★ LTX 数据源（第二个 ed2k 来源）：必须挂在静态挂载**之前**，
+    #   否则会被挂在 "/" 的 StaticFiles 吞掉（见下方注释）。
+    app.include_router(ltx.router)
 
     # 静态资源必须**最后**挂载：Starlette 按注册顺序匹配，
     # 挂在 "/" 的 StaticFiles 会吞掉之后注册的所有路由。

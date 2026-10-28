@@ -141,6 +141,26 @@
       return request('DELETE', '/api/posts/' + tid);
     },
 
+    /* ---- LTX 数据源（第二个 ed2k 来源：AVdb 的「LTX破解」板块）
+       与 4K 的差别只有**多一个同步动作**：浏览全部读后端本地镜像，
+       同步时才真正访问 AVdb。 */
+    getLtxStatus: function () { return request('GET', '/api/ltx/status'); },
+    getLtxDates: function () { return request('GET', '/api/ltx/dates'); },
+    getLtxPosts: function (date) {
+      return request('GET', '/api/ltx/posts?date=' + encodeURIComponent(date));
+    },
+    // ★ 全量 7 页 ≈ 3 秒，但 AVdb 慢起来可能十几秒；默认 10 秒太紧。
+    syncLtx: function () { return request('POST', '/api/ltx/sync', undefined, 60000); },
+    forwardLtx: function (id) {
+      return request('POST', '/api/ltx/' + id + '/forward');
+    },
+    forwardLtxDay: function (date, count) {
+      var budget = FORWARD_BASE_TIMEOUT + FORWARD_PER_POST_MS * (count || 0);
+      return request('POST',
+        '/api/ltx/forward?date=' + encodeURIComponent(date),
+        undefined, budget);
+    },
+
     // TG 转发（T-1/T-2）。★ 不是文件下载——是把 ed2k 发到 Bot，
     // 由 Bot 侧的 aria2/qBittorrent 接手。
     forward: function (tid) {

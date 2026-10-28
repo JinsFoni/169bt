@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>4K 归档台</title>
+<title>169BT 归档台</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23080A0F'/%3E%3Crect x='9' y='9' width='14' height='14' rx='3' fill='%234593FF'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -42,8 +42,19 @@
 
     <div class="brand">
       <span class="brand-mark" aria-hidden="true"></span>
-      <span class="brand-text">169BT 4K</span>
+      <span class="brand-text">169BT</span>
     </div>
+
+    <!-- 数据源切换（S-1）：4K = 169bt 论坛采集，LTX = 自建 AVdb 的
+         「LTX破解」板块。两个来源的卡片字段完全一致，视图层一套代码。
+         ★ 用 role=tablist 而非普通按钮：键盘左右键可切换，屏幕阅读器
+           也知道这是同一区域的两个视图。 -->
+    <nav class="sources" id="sourceNav" role="tablist" aria-label="数据源">
+      <button class="src" id="src4k" type="button" role="tab"
+              data-src="4k" aria-selected="true">4K</button>
+      <button class="src" id="srcLtx" type="button" role="tab"
+              data-src="ltx" aria-selected="false" tabindex="-1">LTX</button>
+    </nav>
 
     <div class="topbar-actions">
       <button class="btn btn-icon" id="copyDay" type="button" title="复制当日全部 ED2K 链接" aria-label="复制当日全部 ED2K 链接">
@@ -135,6 +146,10 @@
           <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7"/><path d="M3 10h14M10 3c1.9 2.2 2.9 4.5 2.9 7S11.9 14.8 10 17c-1.9-2.2-2.9-4.5-2.9-7S8.1 5.2 10 3Z"/></svg>
           <span>站点</span>
         </button>
+        <button class="dnav" id="tab-ltx" role="tab" aria-selected="false" aria-controls="pane-ltx" data-pane="ltx" type="button" tabindex="-1">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5.5h14M3 10h9M3 14.5h5"/><circle cx="15" cy="13.5" r="2.5"/></svg>
+          <span>LTX 数据源</span>
+        </button>
         <button class="dnav" id="tab-basic" role="tab" aria-selected="false" aria-controls="pane-basic" data-pane="basic" type="button" tabindex="-1">
           <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 6.5h9M15.5 6.5H17M3 13.5h3M9.5 13.5H17"/><circle cx="13.5" cy="6.5" r="1.7"/><circle cx="7.5" cy="13.5" r="1.7"/></svg>
           <span>基础设置</span>
@@ -196,6 +211,61 @@
           <footer class="pane-foot">
             <span class="save-state" data-state="site"></span>
             <button class="btn btn-primary" type="button" data-save="site">保存</button>
+          </footer>
+        </section>
+
+        <section class="pane" id="pane-ltx" role="tabpanel" aria-labelledby="tab-ltx" data-pane="ltx" hidden>
+          <div class="pane-scroll">
+            <div class="pane-head">
+              <h3 class="pane-title">LTX 数据源</h3>
+              <p class="pane-desc">顶栏「LTX」页的资源来自自建 AVdb 实例的 LTX破解 板块。</p>
+            </div>
+
+            <div class="field">
+              <label class="field-label" for="ltxBase">AVdb 地址</label>
+              <input class="input is-mono" id="ltxBase" type="text" placeholder="http://192.168.0.108:8000" autocomplete="off" spellcheck="false">
+              <p class="field-hint">留空则用默认地址；不要带路径，末尾斜杠会自动去掉。</p>
+            </div>
+
+            <div class="field-row">
+              <div class="field field-grow">
+                <label class="field-label" for="ltxUser">账号</label>
+                <input class="input" id="ltxUser" type="text" placeholder="—" autocomplete="off" spellcheck="false">
+              </div>
+              <div class="field field-grow">
+                <label class="field-label" for="ltxPass">密码</label>
+                <div class="input-wrap">
+                  <input class="input" id="ltxPass" type="password" placeholder="—" autocomplete="new-password">
+                  <button class="reveal" type="button" aria-label="显示密码" aria-pressed="false" data-reveal="ltxPass">
+                    <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2 10s3-5.4 8-5.4S18 10 18 10s-3 5.4-8 5.4S2 10 2 10Z"/><circle cx="10" cy="10" r="2.2"/></svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div class="field">
+              <label class="field-label" for="ltxKey">API Key（可选）</label>
+              <div class="input-wrap">
+                <input class="input is-mono" id="ltxKey" type="password" placeholder="—" autocomplete="off">
+                <button class="reveal" type="button" aria-label="显示密钥" aria-pressed="false" data-reveal="ltxKey">
+                  <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2 10s3-5.4 8-5.4S18 10 18 10s-3 5.4-8 5.4S2 10 2 10Z"/><circle cx="10" cy="10" r="2.2"/></svg>
+                </button>
+              </div>
+              <p class="field-hint">检索接口只认登录令牌，所以同步用上面的账号密码；这项留给手工调 AVdb 的其它接口。</p>
+            </div>
+
+            <p class="field-hint">
+              同步会把 LTX破解 全板块（约 650 条）拉到本地镜像：日期条、月历、已下载标记都读本地，
+              AVdb 掉线也能翻已同步的内容。登录令牌加密保存，失效后自动重登。
+            </p>
+
+            <div class="ltx-stat" id="ltxStat" hidden></div>
+          </div>
+
+          <footer class="pane-foot">
+            <span class="save-state" data-state="ltx"></span>
+            <button class="btn" type="button" id="ltxSyncNow">立即同步</button>
+            <button class="btn btn-primary" type="button" data-save="ltx">保存</button>
           </footer>
         </section>
 

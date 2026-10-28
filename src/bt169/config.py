@@ -12,6 +12,8 @@ __all__ = [
     "section_key", "is_secret",
     "FORUM_BASE", "DEFAULT_FID", "THREADS_PER_PAGE", "FETCH_DELAY_RANGE",
     "USER_AGENT", "MAX_BACKFILL_PAGES", "MAX_BACKFILL_DAYS",
+    "AVDB_DEFAULT_BASE", "AVDB_LTX_WEBSITE", "AVDB_LTX_SECTION",
+    "AVDB_PAGE_SIZE", "AVDB_MAX_PAGES", "AVDB_TIMEOUT", "LTX_SYNC_TTL",
 ]
 
 # 项目根：src/bt169/config.py → src/bt169 → src → 项目根
@@ -38,12 +40,19 @@ UI_DIR = Path(
 )
 
 #: 落库前必须加密的设置键名（比对的是**最后一段**）。
+#:
+#: ``jwt``：AVdb 登录换来的访问令牌（存为 ``ltx.jwt``）。它不面向用户，
+#: 但持有它就等于持有那个 AVdb 账号——必须和密码同级加密，
+#: 且 ``get_all(masked=True)`` 会把它换成占位符（不泄露给前端）。
 SECRET_FIELDS = frozenset(
-    {"password", "token", "apikey", "api_key", "secret", "api_hash", "session"}
+    {"password", "token", "apikey", "api_key", "secret", "api_hash", "session",
+     "jwt"}
 )
 
 #: 设置分区（与前端设置弹窗一一对应）。顺序即展示顺序。
-SETTINGS_SECTIONS = ("site", "basic", "proxy", "emby", "tg")
+#:
+#: ``ltx`` 紧跟 ``site``：两者都是「数据源」，在设置页里挨着才顺手。
+SETTINGS_SECTIONS = ("site", "ltx", "basic", "proxy", "emby", "tg")
 
 #: 密钥字段读取时返回的占位符。提交时等于此值 → 视为「未修改」。
 PLACEHOLDER = "\u2022" * 8  # ••••••••
@@ -153,3 +162,29 @@ MAX_BACKFILL_PAGES = 200
 
 #: 回填允许的最大天数跨度。
 MAX_BACKFILL_DAYS = 366
+
+
+# ---------------------------------------------------------------- AVdb（LTX 数据源）
+
+#: AVdb 默认地址（用户自建实例，跑在同一台飞牛上）。
+#:
+#: ★ 存设置而不是写死：地址会变（端口、反代、换机器），而常量改动要发版。
+#:   这里只作为「设置页的默认值」出现。
+AVDB_DEFAULT_BASE = "http://192.168.0.108:8000"
+
+#: LTX 板块在 AVdb 里的站点标识与版块名（实测：``website=ltx``，
+#: ``section=LTX破解``，该站总计 658 条，全部是 ed2k）。
+AVDB_LTX_WEBSITE = "ltx"
+AVDB_LTX_SECTION = "LTX破解"
+
+#: 单页条数。AVdb 的 ``ArticleQuery.page_size`` 上限是 100。
+AVDB_PAGE_SIZE = 100
+
+#: 翻页保护上限（658 条 ÷ 100 ≈ 7 页；20 页留足增长余量）。
+AVDB_MAX_PAGES = 20
+
+#: 请求超时（秒）。AVdb 在局域网内，正常 0.4 s 一页。
+AVDB_TIMEOUT = 30.0
+
+#: LTX 镜像的「新鲜」时长（秒）。过期后前端打开 LTX 页会触发一次全量同步。
+LTX_SYNC_TTL = 600

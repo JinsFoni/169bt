@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 __all__ = [
     "PostStatus", "VALID_STATUSES", "BROWSABLE_STATUSES", "SETTLED_STATUSES",
-    "Post", "PostDTO",
+    "Post", "PostDTO", "LtxItem", "LtxPostDTO", "format_size",
 ]
 
 PostStatus = Literal["pending", "thanked", "done", "failed", "nolink"]
@@ -136,6 +136,134 @@ class PostDTO:
             status=post.status,
             emby_in_library=emby_in_library,
             tg_sent_at=post.tg_sent_at,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+# ---------------------------------------------------------------- LTX 数据源
+
+#: 灯箱档宽度（与 ``collector/imagecache.LIGHTBOX_WIDTH`` 保持一致）。
+#:
+#: ★ 这里不 import imagecache：那个模块为了转码 import 了 PIL，而 models 是
+#:   领域层，被几乎所有测试直接 import。两个整数不值得把 PIL 拉成硬依赖。
+#:   ``tests/test_ltx_dto.py`` 有一条断言钉住两者相等。
+_LIGHTBOX_WIDTH = 1200
+
+
+def format_size(size_bytes: int | None) -> str | None:
+    """字节数 → 卡片显示用的体积（``3607826070`` → ``"3.4GB"``）。
+
+    写法对齐 4K 帖子里抓到的原文风格（``7GB`` / ``1.2GB``）：无空格、
+    一位小数、单位大写。**与 ``posts.size`` 同格式**，卡片因此不需要
+    为两个来源写两套渲染。
+    """
+    if not size_bytes or size_bytes <= 0:
+        return None
+    gb = size_bytes / 1024 ** 3
+    if gb >= 1:
+        return f"{gb:.1f}GB"
+    mb = size_bytes / 1024 ** 2
+    return f"{mb:.0f}MB"
+
+
+@dataclass(frozen=True, slots=True)
+class LtxItem:
+    """``ltx_items`` 表的一行（AVdb LTX 破解板块的本地镜像）。
+
+    ★ ``id`` 是 **AVdb 的资源 tid**（16 位合成号），与论坛 tid 无关；
+      DTO 里它顶上 ``tid`` 的位置，前端「按 tid 找卡」的既有逻辑照旧可用。
+    """
+
+    id: int
+    number: str | None
+    title: str
+    section: str | None
+    publish_date: str
+    size_bytes: int | None
+    ed2k: str | None
+    cover_url: str | None
+    detail_url: str | None
+    rejected: int
+    created_at: str | None
+    tg_sent_at: str | None
+    fetched_at: str
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> LtxItem:
+        return cls(**{f.name: row[f.name] for f in fields(cls)})  # type: ignore[arg-type]
+
+
+@dataclass(frozen=True, slots=True)
+class LtxPostDTO:
+    """API 输出对象：**字段名与 :class:`PostDTO` 完全一致**。
+
+    ★ 为什么强行对齐：前端 ``cardHTML`` / 灯箱 / 复制 / 转发都按
+      ``{tid, title, code, cover, cover_orig, ed2k, size, release_date,
+      tg_sent_at}`` 消费。对齐之后 LTX 页复用同一套渲染代码，
+      而不是复制一份改字段名——两份卡片模板以后必然走形。
+
+    ``actress`` 恒为 ``None``（AVdb 的 LTX 条目没有演员字段）；
+    ``detail`` 同理（只有一张封面）。
+    """
+
+    tid: int
+    title: str
+    code: str | None
+    actress: str | None
+    release_date: str | None
+    size: str | None
+    cover: str | None
+    detail: str | None
+    ed2k: str | None
+    post_date: str
+    status: str
+    emby_in_library: bool
+    tg_sent_at: str | None = None
+    cover_orig: str | None = None
+    detail_orig: str | None = None
+
+    @classmethod
+    def from_item(
+        cls,
+        item: LtxItem,
+        *,
+        cover: str | None = None,
+        cover_orig: str | None = None,
+    ) -> LtxPostDTO:
+        """``cover``/``cover_orig`` 可由路由层覆盖；缺省走「封面代理端点」。
+
+        缺省值是 ``/api/ltx/cover/{id}``——它按需下载、转码、落盘再回字节。
+        这样**列表接口不逐张下载图片**（20 张卡串行下载会把首屏拖到十几秒），
+        图片由浏览器并行请求、逐张本地化。
+
+        ★ 灯箱要 1200px 档，所以 ``cover_orig`` 多带一个 ``?w=``：卡片用
+          600（默认），灯箱用 1200。宽度常量抄自
+          ``collector/imagecache.py``（models 不 import 它，避免为了两个
+          整数把 PIL 拖进领域层），一致性由 ``tests/test_ltx_dto.py`` 钉住。
+        """
+        base = f"/api/ltx/cover/{item.id}" if item.cover_url else None
+        fallback = base
+        fallback_orig = (
+            f"{base}?w={_LIGHTBOX_WIDTH}" if base else None
+        )
+        return cls(
+            tid=item.id,
+            title=item.title or "",
+            code=item.number,
+            actress=None,
+            release_date=item.publish_date,
+            size=format_size(item.size_bytes),
+            cover=cover or fallback,
+            detail=None,
+            cover_orig=cover_orig or fallback_orig,
+            detail_orig=None,
+            ed2k=item.ed2k,
+            post_date=item.publish_date,
+            status="done",
+            emby_in_library=False,
+            tg_sent_at=item.tg_sent_at,
         )
 
     def to_dict(self) -> dict[str, Any]:
